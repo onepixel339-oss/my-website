@@ -1,0 +1,181 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Post {
+  id        String   @id @default(cuid())
+  title     String
+  content   String?
+  published Boolean  @default(false)
+  authorId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Content moderation pipeline — "exchange" message board
+//
+// ExchangeMessage: a participant-submitted message. `isHidden` controls
+//   distribution. Moderation runs SYNCHRONOUSLY before the INSERT in the
+//   exchange endpoint and decides the initial `moderationStatus`.
+//
+//   moderationStatus values:
+//     "published"          -> visible to other participants (isHidden = false)
+//     "rejected"           -> severe policy violation, never distributed
+//     "pending_review"     -> borderline, queued for lightweight human review
+//     "self_harm_blocked"  -> self-harm/suicide risk; not distributed; author
+//                             shown a supportive response with crisis resources
+//
+// ModerationLog: immutable audit record of each moderation decision. Per
+//   policy it stores ONLY the flag type, confidence score and resulting
+//   decision. It deliberately does NOT store matched phrases / trigger words
+//   (see requirement: "never store or expose which specific words triggered a
+//   flag to end users").
+// ---------------------------------------------------------------------------
+
+model ExchangeMessage {
+  id                   String         @id @default(cuid())
+  authorId             String
+  authorHandle         String
+  content              String
+  // Bottle-app fields -------------------------------------------------------
+  // `category` is optional (one of advice|venting|fun_question|encouragement)
+  // and is set by the bottle composer to help with later matching.
+  // `language` is auto-detected server-side from the message's script.
+  // `revealCount` / `reportedCount` are moderation + engagement counters.
+  // `source` discriminates the surface that created the row so the bottle
+  // feed (source = "bottle") and the legacy exchange feed (source =
+  // "exchange") never cross-pollinate. Defaults to "exchange" so existing
+  // rows backfill cleanly.
+  category             String?
+  language             String         @default("en")
+  revealCount          Int            @default(0)
+  reportedCount        Int            @default(0)
+  source               String         @default("exchange")
+  // `isSeed` marks curated starter messages that backfill the reciprocal-
+  // unlock pool during cold start (when fewer than 20 real user messages
+  // exist). Seeds are published, non-hidden, and indistinguishable from real
+  // bottles in the public feed — they just retire from the exchange pool
+  // once the community has enough real content.
+  isSeed               Boolean        @default(false)
+  // --- Lightweight reactions (Task: reactions) ------------------------------
+  // Three anonymous reaction counters on a revealed bottle. Incremented by
+  // POST /api/messages/[id]/react with basic per-session throttling (no hard
+  // duplicate prevention beyond that, per spec). Defaults to 0 so existing
+  // rows backfill cleanly.
+  reactionsHeart       Int            @default(0)
+  reactionsSmile       Int            @default(0)
+  reactionsFeelYou     Int            @default(0)
+  // `privateToken` is an unguessable URL-safe token generated at publish time
+  // and returned ONCE to the author. The author can save the resulting
+  // `/?bottle=<token>` link to revisit their own bottle later and see the
+  // reactions + quick-word replies left by readers — no login required.
+  // Nullable so pre-existing rows (created before this feature) simply have
+  // no revisit link; SQLite allows multiple NULLs in a UNIQUE column.
+  privateToken         String?        @unique
+  // --- Time Capsule (optional feature) -------------------------------------
+  // `visibleAfter` is an optional timestamp. When set, the bottle is stored
+  // immediately (published, non-hidden) but is EXCLUDED from the reciprocal-
+  // unlock exchange pool until `visibleAfter` has passed. This lets an author
+  // schedule their bottle to "drift in" after 24h / 7 days / 1 year instead
+  // of entering the shared pool right away. NULL = visible immediately (the
+  // default, so existing rows backfill). The browse feed (GET /api/messages)
+  // still shows time-capsuled bottles immediately — only the EXCHANGE
+  // selection pool respects this gate, because that is the "shared pool"
+  // referenced by the spec. Indexed for fast filtering on the exchange path.
+  visibleAfter         DateTime?
+  // -------------------------------------------------------------------------
+  isHidden             Boolean        @default(true)
+  moderationStatus     String         @default("pending_review")
+  moderationFlagType   String?
+  moderationConfidence Float?
+  publishedAt          DateTime?
+  adminResolvedAt      DateTime?
+  adminNote            String?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  moderationLogs       ModerationLog[]
+  quickReplies         QuickReply[]
+  bottleReplies        BottleReply[]
+
+  @@index([moderationStatus])
+  @@index([isHidden])
+  @@index([createdAt])
+  @@index([source])
+  @@index([category])
+  @@index([isSeed])
+  @@index([visibleAfter])
+}
+
+// ---------------------------------------------------------------------------
+// Quick replies: short (<=30 char) anonymous responses attached to a
+// published message. The PII filter (src/lib/pii-filter.ts) runs on every
+// quick reply BEFORE the INSERT, exactly as it does for messages.
+// ---------------------------------------------------------------------------
+
+model QuickReply {
+  id           String          @id @default(cuid())
+  messageId    String
+  message      ExchangeMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  authorHandle String
+  content      String
+  createdAt    DateTime        @default(now())
+
+  @@index([messageId])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Bottle replies: short (<=30 char) anonymous quick-word replies left by a
+// reader on a revealed bottle. Distinct from the exchange `QuickReply` table
+// (which carries an authorHandle for the legacy exchange board): bottle
+// replies are FULLY anonymous — no handle, no identity — because they are
+// visible ONLY to the original author via their private token link. There is
+// no chat thread and no ongoing conversation; each reply is a one-shot note.
+// The PII filter (src/lib/pii-filter.ts) runs on every reply BEFORE the
+// INSERT, exactly as it does for messages and quick replies.
+// ---------------------------------------------------------------------------
+
+model BottleReply {
+  id           String          @id @default(cuid())
+  messageId    String
+  message      ExchangeMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  content      String
+  createdAt    DateTime        @default(now())
+
+  @@index([messageId])
+  @@index([createdAt])
+}
+
+model ModerationLog {
+  id           String          @id @default(cuid())
+  messageId    String
+  message      ExchangeMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  flagType     String
+  confidence   Float
+  decision     String
+  modelVersion String?
+  createdAt    DateTime        @default(now())
+
+  @@index([messageId])
+  @@index([flagType])
+  @@index([decision])
+}

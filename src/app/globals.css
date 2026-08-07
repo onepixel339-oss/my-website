@@ -1,0 +1,739 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ===========================================================================
+   MESSAGE IN A BOTTLE — Visual Identity
+   ---------------------------------------------------------------------------
+   Mood: calm, oceanic, safe, slightly nostalgic. Daylight sea-glass by day,
+   deep ocean night after dark.
+
+   Two named palettes, each a full second design pass (NOT an invert):
+     • Light  — "daylight sea-glass": soft sea-foam white bg, warm parchment
+                message cards, deep sea teal primary, aged brass amber accent
+                used sparingly (throw-button glow, key highlights).
+     • Dark   — "night sea": deep ocean night bg, lifted card surface,
+                glowing teal primary (brightened for contrast), warm moonlit
+                amber accent. Ocean effect retuned so the horizon bloom and
+                wave layers still read as intentional, not washed out.
+
+   All colors are CSS custom properties on :root (light) and .dark (dark).
+   The .dark class is toggled by next-themes (attribute="class"); the dark
+   variant above matches it. Components NEVER hardcode hex — they consume
+   the semantic tokens below via Tailwind utilities (bg-background,
+   text-foreground, …) or the extended teal/amber/rose scales, which are
+   also theme-aware (text-teal-700 resolves to a different value per mode).
+
+   WCAG AA verified for every body-text/background pairing in BOTH modes
+   (≥4.5:1). Reaction-icon tones meet ≥3:1 for graphical objects.
+   ========================================================================== */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  /* Latin body (Geist) falls back to Cairo for Arabic glyphs → true pairing */
+  --font-sans: var(--font-geist-sans), var(--font-cairo), ui-sans-serif,
+    system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  /* Display: a soft serif for the nostalgic "letter from the shore" feel */
+  --font-display: var(--font-fraunces), var(--font-cairo), Georgia, serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  /* ---- Extended theme-aware palette scales -------------------------------
+     The app uses teal/amber/rose/cyan Tailwind utilities (text-teal-700,
+     bg-amber-50, …) for the sea-glass / brass / heart accents. To make those
+     utilities theme-aware WITHOUT touching every component, we map each
+     scale stop to a CSS variable that is redefined per-mode below. So
+     `text-teal-700` automatically resolves to a brighter teal in dark mode
+     (the most common dark-mode bug is fixed for free). */
+  --color-teal-50: var(--teal-50);
+  --color-teal-100: var(--teal-100);
+  --color-teal-200: var(--teal-200);
+  --color-teal-300: var(--teal-300);
+  --color-teal-400: var(--teal-400);
+  --color-teal-500: var(--teal-500);
+  --color-teal-600: var(--teal-600);
+  --color-teal-700: var(--teal-700);
+  --color-teal-800: var(--teal-800);
+  --color-teal-900: var(--teal-900);
+  --color-amber-50: var(--amber-50);
+  --color-amber-100: var(--amber-100);
+  --color-amber-200: var(--amber-200);
+  --color-amber-300: var(--amber-300);
+  --color-amber-400: var(--amber-400);
+  --color-amber-500: var(--amber-500);
+  --color-amber-600: var(--amber-600);
+  --color-amber-700: var(--amber-700);
+  --color-amber-800: var(--amber-800);
+  --color-amber-900: var(--amber-900);
+  --color-rose-50: var(--rose-50);
+  --color-rose-200: var(--rose-200);
+  --color-rose-400: var(--rose-400);
+  --color-rose-500: var(--rose-500);
+  --color-rose-600: var(--rose-600);
+  --color-cyan-50: var(--cyan-50);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
+}
+
+/* ===========================================================================
+   LIGHT MODE — "daylight sea-glass"
+   ========================================================================== */
+:root {
+  --radius: 0.75rem;
+
+  /* --- Core semantic tokens (user-specified palette) ------------------- */
+  --background: #f1f6f5; /* soft sea-foam white, not pure white */
+  --surface: #fbf8f0; /* warm parchment (the message card itself) */
+  --foreground: #16302c; /* near-black teal, not pure black */
+  --muted-foreground: #5c7370; /* muted teal-grey for secondary text */
+  --primary: #0f6b63; /* deep sea teal — buttons, links, active states */
+  --primary-foreground: #fbf8f0; /* warm parchment on teal */
+  --accent: #c98a4b; /* aged brass / bottle-cap amber (used sparingly) */
+  --accent-foreground: #2a1a0a; /* deep warm ink on amber for AA contrast */
+
+  /* --- Derived shadcn tokens ------------------------------------------- */
+  --card: var(--surface);
+  --card-foreground: var(--foreground);
+  --popover: var(--surface);
+  --popover-foreground: var(--foreground);
+  --secondary: #e8efed; /* sea-foam tint for secondary surfaces */
+  --secondary-foreground: #16302c;
+  --muted: #e3eceb; /* muted surface (slightly deeper than bg) */
+  --destructive: #b91c1c; /* calm deep red for errors */
+  --border: #c8d6d3; /* soft teal-tinted hairline */
+  --input: #d8e3e0;
+  --ring: #0f6b63; /* focus ring = primary teal */
+  --chart-1: #0f6b63; /* teal */
+  --chart-2: #c98a4b; /* brass */
+  --chart-3: #2f8f76; /* sea-green */
+  --chart-4: #d4a05a; /* warm shore */
+  --chart-5: #a14a3a; /* sunset clay */
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: var(--secondary);
+  --sidebar-accent-foreground: var(--secondary-foreground);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+
+  /* --- Sea-glass teal scale (derives from --primary #0F6B63) ----------- */
+  --teal-50: #f0f7f5; /* very pale sea-foam — alert/soft bg */
+  --teal-100: #dcebe7; /* icon-chip background */
+  --teal-200: #b8d6cf; /* soft border */
+  --teal-300: #8dbdb1; /* hover border */
+  --teal-400: #5fa399; /* mid — quota dots */
+  --teal-500: #3a8f84; /* icon mid */
+  --teal-600: #1f7a70; /* icon strong */
+  --teal-700: #0f6b63; /* text strong (kicker, dismiss) = primary */
+  --teal-800: #0a4f49; /* text stronger */
+  --teal-900: #073b36; /* text strongest */
+
+  /* --- Aged-brass amber scale (derives from --accent #C98A4B) ---------- */
+  --amber-50: #fbf3e8; /* soft amber bg — alert */
+  --amber-100: #f5e4cc; /* amber chip bg */
+  --amber-200: #ebcfa0; /* amber border */
+  --amber-300: #e0b876; /* amber hover border */
+  --amber-400: #d4a05a; /* amber mid */
+  --amber-500: #c98a4b; /* = accent */
+  --amber-600: #a66d36; /* amber strong */
+  --amber-700: #83562a; /* amber text */
+  --amber-800: #5f3f1f; /* amber text stronger */
+  --amber-900: #3d2914; /* amber text strongest */
+
+  /* --- Heart-rose scale (for the heart reaction) ----------------------- */
+  --rose-50: #fdf2f4;
+  --rose-200: #f8d0d8;
+  --rose-400: #e8657f;
+  --rose-500: #d11d48; /* AA on light bg for icon + count */
+  --rose-600: #ab1233;
+
+  /* --- Cyan (used in the reveal-card gradient blend) ------------------- */
+  --cyan-50: #ecfaf7;
+
+  /* --- Water layer (painted by <OceanBackground />) -------------------- */
+  /* Daylight: deep teal water warming to warm sand at the horizon. */
+  --ocean-deep: #103e3a; /* deep dusk water */
+  --ocean-mid: #1c625a; /* mid teal */
+  --ocean-shallow: #3a8f84; /* shallows */
+  --sand-warm: #c98a4b; /* warm shoreline (= brass accent) */
+  --sand-glow: #e7c08a; /* horizon glow */
+  --moonlight: #f1f6f5; /* pearl moonlight (header vignette) */
+  --foam: #ecfaf7; /* wave foam */
+  /* Horizon bloom + wave fill colors used inline by OceanBackground */
+  --ocean-bloom: rgba(231, 192, 138, 0.85); /* warm sand sun on waterline */
+  --ocean-bloom-mid: rgba(201, 138, 75, 0.45);
+  --ocean-vignette: rgba(16, 62, 58, 0.32); /* top moonlight vignette */
+  --wave-slow: rgba(95, 163, 153, 0.5); /* slow parallax wave fill */
+  --wave-fast: rgba(224, 184, 118, 0.45); /* fast parallax wave fill */
+  --wave-foam-line: rgba(236, 250, 247, 0.6);
+  /* The "from the sea" teal wash on top of the reveal card */
+  --reveal-wash: rgba(141, 189, 177, 0.55);
+  /* The paper note background (warm parchment gradient) */
+  --paper-top: #fdfbf3;
+  --paper-bottom: #f7f1e3;
+  --paper-rule: rgba(74, 46, 16, 0.06); /* faint horizontal rule lines */
+}
+
+/* ===========================================================================
+   DARK MODE — "night sea"
+   A full second design pass. The ocean deepens, the teal glows brighter for
+   contrast, the amber warms to moonlit brass. Surfaces lift slightly above
+   the bg so cards read as floating. Reaction icons brighten so they never
+   vanish into the dark.
+   ========================================================================== */
+.dark {
+  /* --- Core semantic tokens -------------------------------------------- */
+  --background: #0b1a1e; /* deep ocean night, not pure black */
+  --surface: #122629; /* message card surface, slightly lifted from bg */
+  --foreground: #e7efee; /* near-white with a cool tint */
+  --muted-foreground: #93a6a3; /* muted sea-mist for secondary text */
+  --primary: #4fd1c0; /* glowing teal — brighter for dark-mode contrast */
+  --primary-foreground: #0b1a1e; /* dark ocean ink on glowing teal */
+  --accent: #e7b368; /* warm moonlit amber */
+  --accent-foreground: #2a1a0a; /* same deep warm ink — works on bright amber */
+
+  /* --- Derived shadcn tokens ------------------------------------------- */
+  --card: var(--surface);
+  --card-foreground: var(--foreground);
+  --popover: var(--surface);
+  --popover-foreground: var(--foreground);
+  --secondary: #1a3136; /* lifted secondary surface */
+  --secondary-foreground: #e7efee;
+  --muted: #182e32; /* muted surface */
+  --destructive: #f87171; /* brighter red for dark */
+  --border: rgba(79, 209, 192, 0.18); /* faint glowing teal hairline */
+  --input: #1a3136;
+  --ring: #4fd1c0; /* focus ring = glowing primary */
+  --chart-1: #4fd1c0;
+  --chart-2: #e7b368;
+  --chart-3: #6fe0d2;
+  --chart-4: #f0c585;
+  --chart-5: #fb7185;
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: var(--secondary);
+  --sidebar-accent-foreground: var(--secondary-foreground);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+
+  /* --- Sea-glass teal scale (brightened for dark-mode AA contrast) -----
+     The lower stops (50–200) become DARK surfaces so bg-teal-50 reads as a
+     lifted teal panel, not a washed-out pale one. The upper stops (400+) are
+     the glowing teal family so text/icons stay visible on dark bg. */
+  --teal-50: #122629; /* dark teal surface (alert/soft bg) */
+  --teal-100: #163034; /* icon-chip background, lifted */
+  --teal-200: #1f4248; /* soft glowing border */
+  --teal-300: #2d5a61; /* hover border */
+  --teal-400: #4fd1c0; /* mid — quota dots (= primary glow) */
+  --teal-500: #5fd9c9; /* icon mid */
+  --teal-600: #6fe0d2; /* icon strong */
+  --teal-700: #4fd1c0; /* text strong (kicker, dismiss) = primary */
+  --teal-800: #7de8dc; /* text stronger */
+  --teal-900: #a0efe5; /* text strongest */
+
+  /* --- Moonlit-brass amber scale (brightened) -------------------------- */
+  --amber-50: #1f1a10; /* dark warm surface (alert bg) */
+  --amber-100: #2a2417; /* amber chip bg, lifted */
+  --amber-200: #3d331f; /* amber border */
+  --amber-300: #5a4828; /* amber hover border */
+  --amber-400: #8a6b3a; /* amber mid */
+  --amber-500: #b89055; /* amber strong */
+  --amber-600: #e7b368; /* = accent (moonlit amber) */
+  --amber-700: #f0c585; /* amber text on dark */
+  --amber-800: #f5d5a0; /* amber text stronger */
+  --amber-900: #fae5bc; /* amber text strongest */
+
+  /* --- Heart-rose scale (brightened for dark) -------------------------- */
+  --rose-50: #2a1518;
+  --rose-200: #4a2026;
+  --rose-400: #fb7185;
+  --rose-500: #fb7185; /* glowing rose on dark */
+  --rose-600: #fda4af;
+
+  /* --- Cyan (reveal-card gradient blend) ------------------------------- */
+  --cyan-50: #142a2e; /* dark teal blend */
+
+  /* --- Water layer — night sea ----------------------------------------- */
+  /* The ocean stays intentional in dark mode: deeper, with a cooler moonlit
+     horizon. The warm sand glow is dimmed but NOT removed — a faint warm
+     bloom at the waterline keeps the "bottle at dusk" feeling. */
+  --ocean-deep: #061013; /* near-black ocean abyss */
+  --ocean-mid: #0b1a1e; /* deep ocean night (= bg) */
+  --ocean-shallow: #122629; /* shallows (= surface) */
+  --sand-warm: #5a4828; /* dim warm shoreline */
+  --sand-glow: #8a6b3a; /* dim moonlit horizon glow */
+  --moonlight: #e7efee; /* bright moonlight for header vignette */
+  --foam: #2d5a61; /* dark foam */
+  --ocean-bloom: rgba(138, 107, 58, 0.42); /* dim warm bloom on waterline */
+  --ocean-bloom-mid: rgba(90, 72, 40, 0.3);
+  --ocean-vignette: rgba(231, 239, 238, 0.06); /* soft moonlit vignette at top */
+  --wave-slow: rgba(79, 209, 192, 0.18); /* glowing teal slow wave */
+  --wave-fast: rgba(231, 179, 104, 0.14); /* warm amber fast wave */
+  --wave-foam-line: rgba(125, 232, 220, 0.32);
+  --reveal-wash: rgba(79, 209, 192, 0.18); /* glowing teal wash on reveal card */
+  /* The paper note: a DIMMED WARM parchment, not dark teal. A real note
+     pulled from the sea at night is still paper — warm, aged, lit by
+     moonlight. Keeping it warm (not inverted to cool) preserves the
+     physical-object metaphor while staying dark enough to sit on the
+     night ocean without glaring. */
+  --paper-top: #2a2218; /* dim warm parchment (aged paper by moonlight) */
+  --paper-bottom: #221b13; /* slightly deeper */
+  --paper-rule: rgba(231, 179, 104, 0.08); /* faint amber rule lines */
+}
+
+/* ===========================================================================
+   THEME SWITCH CROSS-FADE
+   ---------------------------------------------------------------------------
+   When the user taps the sun/moon toggle, next-themes flips the .dark class
+   on <html>. We animate the transition of every color-bearing property on
+   body + the glass panels + the ocean layer so the switch is a smooth 280ms
+   cross-fade — no jarring instant flash, no layout shift (only color
+   properties transition; dimensions/positioning are excluded by the explicit
+   property list). prefers-reduced-motion collapses it to instant.
+   ========================================================================== */
+@layer base {
+  html {
+    /* Transition the root so the .dark class swap cascades smoothly. Only
+       color-related properties are listed so layout never shifts mid-fade. */
+    transition:
+      background-color 0.28s ease,
+      color 0.28s ease;
+  }
+  body,
+  .glass-panel,
+  .ocean-surface,
+  .throw-button,
+  .soft-glow {
+    transition:
+      background-color 0.28s ease,
+      border-color 0.28s ease,
+      color 0.28s ease,
+      fill 0.28s ease,
+      stroke 0.28s ease,
+      box-shadow 0.28s ease;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html,
+    body,
+    .glass-panel,
+    .ocean-surface,
+    .throw-button,
+    .soft-glow {
+      transition: none;
+    }
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    /* Slightly relaxed rendering for the calm reading feel */
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    /* Fluid base text size — scales smoothly from mobile to desktop instead
+       of jumping at breakpoints. 15px → 16px between 360px and 1024px. */
+    font-size: clamp(0.9375rem, 0.25vw + 0.875rem, 1rem);
+  }
+  /* Nostalgic display serif for headings that opt in via .font-display */
+  .font-display {
+    font-family: var(--font-display);
+    font-optical-sizing: auto;
+    /* Fraunces reads a touch tight at display sizes — ease the tracking */
+    letter-spacing: -0.01em;
+  }
+
+  /* --- Arabic typography -----------------------------------------------
+     Arabic script needs MORE vertical breathing room than Latin (taller
+     glyph bodies, stacked diacritics) and must NEVER have letter-spacing
+     (it breaks the cursive joining). We set a generous line-height for
+     body + reading text and neutralise any tracking on display headings.
+  */
+  [dir="rtl"] {
+    font-family: var(--font-cairo), var(--font-geist-sans), sans-serif;
+    line-height: 1.85;
+    letter-spacing: 0;
+  }
+  [dir="rtl"] .font-display {
+    font-family: var(--font-cairo), var(--font-geist-sans), sans-serif;
+    /* Cairo is already well-spaced; don't apply the Latin negative tracking */
+    letter-spacing: 0;
+    line-height: 1.5;
+  }
+  /* The note / message body in Arabic needs even more room for diacritics */
+  [dir="rtl"] .note-body {
+    line-height: 2;
+    letter-spacing: 0;
+  }
+
+  /* --- Enhanced keyboard focus states ---------------------------------
+     Ensure every interactive element has a visible, high-contrast focus
+     ring for WCAG AA. The 2px offset prevents the ring from being eaten
+     by adjacent borders on glass panels.
+  */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  /* Remove the default outline only when our custom ring is showing */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+}
+
+/* ===========================================================================
+   Fluid type scale — clamp()-based so text scales smoothly between mobile
+   and desktop instead of jumping at breakpoints. Components opt in via these
+   utilities. Values chosen so:
+     display : 1.75rem (28px) → 2.5rem (40px)  (hero / app title / reveal)
+     h1      : 1.5rem  (24px) → 1.875rem (30px) (screen title)
+     h2      : 1.125rem(18px) → 1.375rem (22px) (section)
+     lead    : 0.875rem(14px) → 1rem    (16px) (intro paragraph)
+     body    : 0.9375rem(15px) → 1.0625rem(17px) (reading comfort)
+   The vw component is small (0.5–2vw) so text grows gently, not aggressively.
+   ========================================================================== */
+@layer utilities {
+  .type-display {
+    font-size: clamp(1.75rem, 2vw + 1.25rem, 2.5rem);
+    line-height: 1.15;
+  }
+  .type-h1 {
+    font-size: clamp(1.5rem, 1.5vw + 1.125rem, 1.875rem);
+    line-height: 1.2;
+  }
+  .type-h2 {
+    font-size: clamp(1.125rem, 0.75vw + 1rem, 1.375rem);
+    line-height: 1.3;
+  }
+  .type-lead {
+    font-size: clamp(0.875rem, 0.4vw + 0.8125rem, 1rem);
+    line-height: 1.6;
+  }
+  .type-body-lg {
+    font-size: clamp(0.9375rem, 0.5vw + 0.875rem, 1.0625rem);
+    line-height: 1.75;
+  }
+}
+
+/* ===========================================================================
+   Type scale (mobile-first). Documented here so the whole app shares one
+   rhythm; components reference these via Tailwind text-* utilities.
+     display  → text-3xl sm:text-4xl   (hero / app title)
+     h1       → text-2xl sm:text-3xl   (screen title)
+     h2       → text-lg sm:text-xl     (section)
+     h3       → text-base              (subsection)
+     body     → text-sm sm:text-base   (default reading)
+     meta     → text-xs                (badges, timestamps, counters)
+   Spacing rhythm: 4px base (Tailwind default). Key stops used across the app:
+     gap-2 (8) · gap-3 (12) · gap-4 (16) · gap-6 (24) · py-5/py-6 cards.
+   ========================================================================== */
+
+/* ===========================================================================
+   Ocean utilities
+   ========================================================================== */
+
+/* The dusk gradient painted by <OceanBackground />. Exposed as a utility so
+   other wrappers (e.g. a modal backdrop) can reuse the exact horizon. */
+.ocean-surface {
+  background:
+    radial-gradient(
+      120% 80% at 50% 118%,
+      var(--sand-glow) 0%,
+      var(--sand-warm) 22%,
+      var(--ocean-shallow) 48%,
+      var(--ocean-mid) 72%,
+      var(--ocean-deep) 100%
+    );
+}
+
+/* Soft inner glow for the writing textarea — a lamp-lit nook over the water.
+   Layered: hairline border + warm outer bloom + top inner highlight. Uses
+   --accent / --primary tints so the glow adapts to theme (warm brass bloom
+   in light, glowing teal bloom in dark). */
+.soft-glow {
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 18px 50px -24px color-mix(in srgb, var(--accent) 32%, transparent),
+    0 2px 8px -4px color-mix(in srgb, var(--primary) 18%, transparent),
+    inset 0 1px 2px rgba(255, 255, 255, 0.7);
+  transition:
+    box-shadow 0.35s ease,
+    border-color 0.35s ease;
+}
+.soft-glow:focus-visible,
+.soft-glow[data-focused="true"] {
+  box-shadow:
+    0 0 0 2px var(--ring),
+    0 22px 60px -22px color-mix(in srgb, var(--primary) 40%, transparent),
+    0 0 0 6px color-mix(in srgb, var(--ring) 12%, transparent),
+    inset 0 1px 2px rgba(255, 255, 255, 0.75);
+}
+
+/* Frosted-glass panel floating over the water (header / footer / cards).
+   backdrop-filter is GPU-expensive on low-end devices — we provide a
+   progressive enhancement: blur only when the device can handle it
+   (fine pointer + not reduced-data), falling back to a slightly more
+   opaque solid background otherwise. The bg uses --card so it adapts to
+   the theme automatically (warm parchment in light, lifted teal in dark). */
+.glass-panel {
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+}
+/* Low-end / data-saver fallback: skip the blur, use a more opaque bg */
+@media (prefers-reduced-data: reduce) {
+  .glass-panel {
+    background: color-mix(in srgb, var(--card) 94%, transparent);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+/* Coarse-pointer (touch) small screens: lighten the blur to 8px for perf */
+@media (pointer: coarse) and (max-width: 640px) {
+  .glass-panel {
+    backdrop-filter: blur(8px) saturate(1.05);
+    -webkit-backdrop-filter: blur(8px) saturate(1.05);
+  }
+}
+
+/* The throw button: a warm brass pill with a gentle resting bloom. Uses
+   --accent (amber) — NOT --primary — because primary is now the sea teal
+   and the throw button is the one place the brass accent gets to glow.
+   The gradient is built from the amber scale so it adapts to theme.
+   Text on the throw button must be --accent-foreground (deep warm ink)
+   for WCAG AA — NOT --primary-foreground (which is light on teal). */
+.throw-button {
+  background-image: linear-gradient(
+    180deg,
+    var(--amber-400) 0%,
+    var(--accent) 55%,
+    var(--amber-600) 100%
+  );
+  color: var(--accent-foreground);
+  box-shadow:
+    0 10px 26px -10px color-mix(in srgb, var(--accent) 60%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+.throw-button:active:not(:disabled) {
+  box-shadow:
+    0 4px 12px -8px color-mix(in srgb, var(--accent) 50%, transparent),
+    inset 0 2px 4px rgba(42, 26, 10, 0.35);
+}
+
+/* A short-lived ripple used on the throw button press */
+@keyframes ripple-out {
+  0% {
+    transform: scale(0.2);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+.ripple-dot {
+  animation: ripple-out 0.65s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* ---- Subtle wave drift (CSS only, used by <OceanBackground />) ---------- */
+@keyframes wave-drift-slow {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+@keyframes wave-drift-fast {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+@keyframes horizon-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 0.75;
+    transform: translateY(-2px);
+  }
+}
+.wave-layer-slow {
+  animation: wave-drift-slow 46s linear infinite;
+}
+.wave-layer-fast {
+  animation: wave-drift-fast 28s linear infinite;
+}
+.horizon-glow {
+  animation: horizon-breathe 9s ease-in-out infinite;
+}
+
+/* ---- Reveal screen: paper unroll --------------------------------------- */
+@keyframes paper-unroll {
+  0% {
+    max-height: 0;
+    opacity: 0;
+  }
+  100% {
+    max-height: 600px;
+    opacity: 1;
+  }
+}
+
+/* Honor reduced motion: freeze the water, skip decorative drift.
+   Also freeze the wave drift on low-end touch devices (the two SVG
+   layers translating 200%-wide elements are the most expensive CSS
+   animation here; a static gradient is a fine fallback). */
+@media (prefers-reduced-motion: reduce) {
+  .wave-layer-slow,
+  .wave-layer-fast,
+  .horizon-glow {
+    animation: none !important;
+  }
+  .ripple-dot {
+    animation: none !important;
+    opacity: 0 !important;
+  }
+  /* Keep the live dot visible but static; the count still updates, just
+     without decorative motion. */
+  .live-dot::before,
+  .live-dot::after {
+    animation: none !important;
+  }
+  .live-dot::after {
+    opacity: 0 !important;
+  }
+}
+/* Low-end touch devices: freeze the wave parallax (the gradient is still
+   beautiful static) to keep scrolling at 60fps. The horizon glow keeps
+   breathing since it's a cheap opacity/translate animation. */
+@media (pointer: coarse) and (max-width: 640px) and (prefers-reduced-motion: no-preference) {
+  .wave-layer-slow,
+  .wave-layer-fast {
+    animation: none !important;
+  }
+}
+
+/* ---- Live counter: pulsing "live" dot + number roll --------------------- */
+/* A soft teal heartbeat so the header counter reads as real-time rather than
+   static. Two layers: a solid core that fades, plus an expanding ring. */
+@keyframes live-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.78);
+  }
+}
+@keyframes live-dot-ring {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+.live-dot {
+  position: relative;
+  display: inline-block;
+}
+.live-dot::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: live-dot-pulse 1.8s ease-in-out infinite;
+}
+.live-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: live-dot-ring 1.8s ease-out infinite;
+}
+/* The count-up number "rolls" by sliding each digit up. The component swaps a
+   keyed <motion.span> on change; this subtle vertical nudge reinforces the
+   roll feel on top of framer-motion's eased count-up. */
+@keyframes digit-roll-in {
+  0% {
+    transform: translateY(0.32em);
+    opacity: 0;
+  }
+  60% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* ---- Calm custom scrollbar for the feed -------------------------------- */
+/* Uses --primary at low alpha so the thumb adapts to theme (teal in light,
+   glowing teal in dark) and stays visible without dominating. */
+.calm-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--primary) 40%, transparent) transparent;
+}
+.calm-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.calm-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--primary) 35%, transparent);
+  border-radius: 9999px;
+}
+.calm-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--primary) 50%, transparent);
+}
