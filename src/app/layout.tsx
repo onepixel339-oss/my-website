@@ -48,7 +48,7 @@ export const metadata: Metadata = {
   ],
   authors: [{ name: "The Shore" }],
   icons: {
-    icon: "/favicon.png",
+    icon: "/favicon.ico",
   },
   openGraph: {
     title: "Message in a Bottle",
