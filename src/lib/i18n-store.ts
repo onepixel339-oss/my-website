@@ -162,6 +162,15 @@ const STRINGS = {
     "impact.poetic.feel_you": "{n} person felt you",
     "impact.poetic.feel_you_plural": "{n} people felt you",
     "impact.and": "and",
+    // --- Admin login (gated moderation dashboard) --------------------------
+    "admin.login.title": "Admin access",
+    "admin.login.body": "Enter the admin token to open the moderation queue.",
+    "admin.login.placeholder": "Admin token",
+    "admin.login.cta": "Unlock",
+    "admin.login.submitting": "Unlocking…",
+    "admin.login.error": "Invalid token. Try again.",
+    "admin.login.disabled": "Admin access is not configured on this deployment.",
+    "admin.logout": "Sign out",
   },
   ar: {
     "app.title": "رسالة في زجاجة",
@@ -294,6 +303,15 @@ const STRINGS = {
     "impact.poetic.feel_you": "شعر بك {n} شخص",
     "impact.poetic.feel_you_plural": "شعر بك {n} أشخاص",
     "impact.and": "و",
+    // --- تسجيل دخول المشرف (لوحة المراجعة المحمية) -------------------------
+    "admin.login.title": "دخول المشرف",
+    "admin.login.body": "أدخل رمز المشرف لفتح قائمة المراجعة.",
+    "admin.login.placeholder": "رمز المشرف",
+    "admin.login.cta": "فتح",
+    "admin.login.submitting": "جارٍ الفتح…",
+    "admin.login.error": "رمز غير صحيح. حاول مرة أخرى.",
+    "admin.login.disabled": "دخول المشرف غير مُهيّأ على هذا النشر.",
+    "admin.logout": "خروج",
   },
 } as const;
 

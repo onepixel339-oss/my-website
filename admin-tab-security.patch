@@ -1,0 +1,559 @@
+diff --git a/src/app/api/admin/session/route.ts b/src/app/api/admin/session/route.ts
+new file mode 100644
+index 0000000..f06ea97
+--- /dev/null
++++ b/src/app/api/admin/session/route.ts
+@@ -0,0 +1,133 @@
++/**
++ * src/app/api/admin/session/route.ts
++ * ---------------------------------------------------------------------------
++ * Minimal admin session gate for the moderation dashboard.
++ *
++ *   GET    /api/admin/session        → { admin: boolean }  (is the current
++ *                                                         visitor an admin?)
++ *   POST   /api/admin/session        → { ok: true }        (login: body
++ *                                                          { token: string })
++ *   DELETE /api/admin/session        → { ok: true }        (logout: clear cookie)
++ *
++ * Why this exists: the AdminReviewDashboard tab was previously rendered for
++ * every visitor. The underlying /api/admin/review endpoints are protected by
++ * `requireAdmin` (cookie or header), but the UI tab itself was always visible
++ * — which is both confusing for end users and a poor security posture. This
++ * route lets the page ask "am I an admin?" and lets the operator log in via a
++ * simple token POST (which sets an httpOnly cookie) so the tab can appear.
++ *
++ * Auth model:
++ *   - When `ADMIN_SECRET_TOKEN` env is NOT set:
++ *       Admin is DISABLED. No one can log in, and `isAdmin(req)` returns
++ *       false. This is the safe default — we never auto-open admin in dev,
++ *       because that leaks the moderation dashboard to every visitor in the
++ *       preview. The operator MUST set `ADMIN_SECRET_TOKEN` in `.env` to
++ *       enable the tab.
++ *   - When `ADMIN_SECRET_TOKEN` env IS set: a POST with the matching token
++ *     sets a `admin_token` httpOnly cookie (SameSite=Lax, 30 days). Subsequent
++ *     requests are authenticated via that cookie (mirrored by `requireAdmin`
++ *     in api-helpers.ts).
++ *
++ * The cookie is the SAME one `requireAdmin` reads, so once the operator logs
++ * in here, every /api/admin/* call is authenticated automatically — no
++ * client-side header injection needed.
++ * ---------------------------------------------------------------------------
++ */
++
++import { NextRequest, NextResponse } from "next/server";
++
++export const runtime = "nodejs";
++export const dynamic = "force-dynamic";
++
++const COOKIE_NAME = "admin_token";
++const COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
++
++/**
++ * Is the current request authenticated as an admin?
++ * Mirrors the logic of `requireAdmin` but returns a boolean instead of a
++ * response, so the GET handler can report status to the client.
++ *
++ *   - No `ADMIN_SECRET_TOKEN` configured → false (admin disabled).
++ *   - Token configured → cookie/header must match.
++ */
++function isAdmin(req: NextRequest): boolean {
++  const expected = process.env.ADMIN_SECRET_TOKEN;
++  if (!expected) {
++    return false;
++  }
++  const headerToken = req.headers.get("x-admin-token");
++  const cookieToken = req.cookies.get(COOKIE_NAME)?.value;
++  return headerToken === expected || cookieToken === expected;
++}
++
++/** Constant-time string compare to avoid timing-based token enumeration. */
++function safeEqual(a: string, b: string): boolean {
++  if (a.length !== b.length) return false;
++  let diff = 0;
++  for (let i = 0; i < a.length; i++) {
++    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
++  }
++  return diff === 0;
++}
++
++export async function GET(req: NextRequest) {
++  return NextResponse.json(
++    { admin: isAdmin(req) },
++    { headers: { "Cache-Control": "no-store, max-age=0" } },
++  );
++}
++
++export async function POST(req: NextRequest) {
++  const expected = process.env.ADMIN_SECRET_TOKEN;
++  // With no token configured, login is permanently disabled (dev or prod).
++  // The operator must set ADMIN_SECRET_TOKEN in .env to enable the dashboard.
++  if (!expected) {
++    return NextResponse.json(
++      { error: "Admin access is not configured." },
++      { status: 503 },
++    );
++  }
++
++  let body: unknown;
++  try {
++    body = await req.json();
++  } catch {
++    return NextResponse.json(
++      { error: "Invalid JSON body." },
++      { status: 400 },
++    );
++  }
++  const fields =
++    typeof body === "object" && body !== null
++      ? (body as Record<string, unknown>)
++      : {};
++  const token = typeof fields.token === "string" ? fields.token : "";
++
++  if (!token || !safeEqual(token, expected)) {
++    // 401 (not 403) — the caller needs to provide credentials.
++    return NextResponse.json(
++      { error: "Invalid token." },
++      { status: 401 },
++    );
++  }
++
++  // Set the httpOnly cookie. SameSite=Lax is enough (admin pages are
++  // same-origin); Secure is on in production automatically via Vercel HTTPS.
++  const res = NextResponse.json({ ok: true, admin: true });
++  res.cookies.set({
++    name: COOKIE_NAME,
++    value: expected,
++    httpOnly: true,
++    sameSite: "lax",
++    secure: process.env.NODE_ENV === "production",
++    maxAge: COOKIE_MAX_AGE,
++    path: "/",
++  });
++  return res;
++}
++
++export async function DELETE() {
++  const res = NextResponse.json({ ok: true, admin: false });
++  res.cookies.delete(COOKIE_NAME);
++  return res;
++}
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index c840466..1184caa 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -32,7 +32,7 @@
+ 
+ import { useEffect, useState } from "react";
+ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+-import { Waves, ClipboardCheck, Info, Gem } from "lucide-react";
++import { Waves, ClipboardCheck, Info, Gem, LogOut, ShieldCheck } from "lucide-react";
+ import { OceanBackground } from "@/components/bottle/ocean-background";
+ import { LocaleToggle } from "@/components/bottle/locale-toggle";
+ import { ThemeToggle } from "@/components/bottle/theme-toggle";
+@@ -42,6 +42,7 @@ import { BottleFeed } from "@/components/bottle/bottle-feed";
+ import { MyBottlePanel } from "@/components/bottle/my-bottle-panel";
+ import { WallOfGems } from "@/components/bottle/wall-of-gems";
+ import { AdminReviewDashboard } from "@/components/exchange/admin-review";
++import { AdminLogin } from "@/components/exchange/admin-login";
+ import { useT } from "@/lib/i18n-store";
+ 
+ export default function Home() {
+@@ -51,6 +52,17 @@ export default function Home() {
+   // The author's private "my bottle" token, if the URL is `/?bottle=<token>`.
+   // Read from window.location on mount (client-only).
+   const [bottleToken, setBottleToken] = useState<string | null>(null);
++  // Admin session: the moderation tab is only rendered when `isAdmin` is
++  // true. The status is fetched from /api/admin/session on mount (and after
++  // a successful login). The small shield button in the header opens the
++  // login dialog when not yet authenticated; the general public never sees
++  // the moderation tab.
++  const [isAdmin, setIsAdmin] = useState(false);
++  const [showAdminLogin, setShowAdminLogin] = useState(false);
++  // Controlled tab state so the admin shield button can programmatically
++  // switch to the admin tab after a successful login (and so we can guard
++  // against being on a tab that just disappeared, e.g. after logout).
++  const [activeTab, setActiveTab] = useState<"sea" | "gems" | "admin">("sea");
+ 
+   useEffect(() => {
+     try {
+@@ -73,6 +85,69 @@ export default function Home() {
+     }
+   }, []);
+ 
++  // Check admin session on mount, and open the login dialog if `?admin=1`
++  // is present (operator entry point). The dialog is closed automatically
++  // when authentication succeeds (see onAuthenticated).
++  useEffect(() => {
++    let cancelled = false;
++    async function check() {
++      try {
++        const params = new URLSearchParams(window.location.search);
++        const wantsAdmin = params.get("admin") === "1";
++        const res = await fetch("/api/admin/session", { cache: "no-store" });
++        const data = (await res.json()) as { admin?: boolean };
++        if (cancelled) return;
++        if (data.admin) {
++          setIsAdmin(true);
++        } else if (wantsAdmin) {
++          // Not authenticated but the operator asked for the gate → show it.
++          setShowAdminLogin(true);
++        }
++      } catch {
++        /* ignore — admin is simply not available */
++      }
++    }
++    void check();
++    return () => {
++      cancelled = true;
++    };
++  }, []);
++
++  // After a successful login, mark as admin and jump straight to the admin
++  // tab so the operator lands in the moderation dashboard. Also drop
++  // `?admin=1` from the URL so it doesn't linger.
++  function onAdminAuthenticated() {
++    setShowAdminLogin(false);
++    setIsAdmin(true);
++    setActiveTab("admin");
++    try {
++      const params = new URLSearchParams(window.location.search);
++      if (params.has("admin")) {
++        params.delete("admin");
++        const qs = params.toString();
++        window.history.replaceState(
++          {},
++          "",
++          qs ? `?${qs}` : window.location.pathname,
++        );
++      }
++    } catch {
++      /* ignore */
++    }
++  }
++
++  async function adminLogout() {
++    try {
++      await fetch("/api/admin/session", { method: "DELETE" });
++    } catch {
++      /* ignore */
++    }
++    setIsAdmin(false);
++    // If we were on the admin tab, fall back to the sea so we don't end up
++    // on a tab that no longer exists.
++    setActiveTab("sea");
++  }
++
+   function backToSea() {
+     try {
+       window.history.replaceState({}, "", window.location.pathname);
+@@ -115,6 +190,28 @@ export default function Home() {
+             <LiveBottleCounter />
+             <LocaleToggle />
+             <ThemeToggle />
++            {/* Subtle admin entry point — a small shield icon. Visible to
++                everyone (so the operator doesn't need to remember a URL),
++                but it only opens a token dialog; without the secret the
++                moderation tab stays hidden. If already authenticated, the
++                click switches to the admin tab directly. */}
++            <button
++              type="button"
++              onClick={() => {
++                if (isAdmin) {
++                  // Already authenticated — jump straight to the admin tab.
++                  setActiveTab("admin");
++                } else {
++                  // Not authenticated — open the login dialog.
++                  setShowAdminLogin(true);
++                }
++              }}
++              aria-label={t("admin.login.title")}
++              title={t("admin.login.title")}
++              className={`glass-panel inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full border border-border/60 text-foreground transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 ${isAdmin ? "text-teal-700" : "text-muted-foreground/60"}`}
++            >
++              <ShieldCheck className="h-4 w-4" aria-hidden />
++            </button>
+           </div>
+         </div>
+       </header>
+@@ -137,8 +234,8 @@ export default function Home() {
+               </p>
+             </div>
+ 
+-            <Tabs defaultValue="sea" className="w-full">
+-              <TabsList className="glass-panel grid w-full grid-cols-3 border border-white/30">
++            <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)} className="w-full">
++              <TabsList className={`glass-panel grid w-full border border-white/30 ${isAdmin ? "grid-cols-3" : "grid-cols-2"}`}>
+                 <TabsTrigger value="sea" className="gap-1.5">
+                   <Waves className="h-4 w-4" aria-hidden />
+                   {t("nav.sea")}
+@@ -147,10 +244,12 @@ export default function Home() {
+                   <Gem className="h-4 w-4" aria-hidden />
+                   {t("nav.gems")}
+                 </TabsTrigger>
+-                <TabsTrigger value="admin" className="gap-1.5">
+-                  <ClipboardCheck className="h-4 w-4" aria-hidden />
+-                  {t("nav.admin")}
+-                </TabsTrigger>
++                {isAdmin && (
++                  <TabsTrigger value="admin" className="gap-1.5">
++                    <ClipboardCheck className="h-4 w-4" aria-hidden />
++                    {t("nav.admin")}
++                  </TabsTrigger>
++                )}
+               </TabsList>
+ 
+               <TabsContent value="sea" className="mt-6 space-y-8">
+@@ -165,16 +264,43 @@ export default function Home() {
+                 </div>
+               </TabsContent>
+ 
+-              <TabsContent value="admin" className="mt-6">
+-                <div className="glass-panel rounded-2xl border border-white/40 p-4 sm:p-6">
+-                  <AdminReviewDashboard />
+-                </div>
+-              </TabsContent>
++              {/* Admin review panel — DEFENSIVELY gated on `isAdmin` in
++                  addition to the tab trigger being hidden. This guarantees
++                  the AdminReviewDashboard (and its data-fetching) never
++                  mounts for a normal visitor, even if `activeTab` were ever
++                  to become "admin" through a future refactor mistake. The
++                  tab trigger above is the primary gate; this is the
++                  belt-and-braces backstop. */}
++              {isAdmin && (
++                <TabsContent value="admin" className="mt-6">
++                  <div className="glass-panel rounded-2xl border border-white/40 p-4 sm:p-6">
++                    <div className="mb-4 flex justify-end">
++                      <button
++                        type="button"
++                        onClick={() => void adminLogout()}
++                        className="inline-flex items-center gap-1.5 rounded-full border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:bg-accent/20"
++                      >
++                        <LogOut className="h-3.5 w-3.5" aria-hidden />
++                        {t("admin.logout")}
++                      </button>
++                    </div>
++                    <AdminReviewDashboard />
++                  </div>
++                </TabsContent>
++              )}
+             </Tabs>
+           </>
+         )}
+       </main>
+ 
++      {/* Admin login dialog — only opened when the URL carries `?admin=1`
++          and the visitor is not yet authenticated. Invisible to the public. */}
++      <AdminLogin
++        open={showAdminLogin}
++        onAuthenticated={onAdminAuthenticated}
++        onClose={() => setShowAdminLogin(false)}
++      />
++
+       {/* Sticky footer — pinned bottom on short pages, pushed down on long. */}
+       <footer className="glass-panel mt-auto border-t border-white/30">
+         <div className="mx-auto w-full max-w-3xl px-4 py-4 sm:px-6">
+diff --git a/src/components/exchange/admin-login.tsx b/src/components/exchange/admin-login.tsx
+new file mode 100644
+index 0000000..d642368
+--- /dev/null
++++ b/src/components/exchange/admin-login.tsx
+@@ -0,0 +1,119 @@
++"use client";
++
++/**
++ * AdminLogin
++ * ---------------------------------------------------------------------------
++ * A small token-gate dialog for the moderation dashboard.
++ *
++ *   - Rendered (modally) by page.tsx ONLY when the URL carries `?admin=1`
++ *     and the visitor is not yet authenticated. This keeps the affordance
++ *     invisible to the general public — there is no "Admin" button anywhere
++ *     on the normal UI.
++ *   - On submit, POSTs the token to /api/admin/session. The server sets an
++ *     httpOnly `admin_token` cookie on success (30 days), so every subsequent
++ *     /api/admin/* call is authenticated automatically — no client-side
++ *     header injection needed.
++ *   - On success, calls onAuthenticated() so the parent can re-check the
++ *     session and render the AdminReviewDashboard + its tab.
++ *   - On 503 (admin not configured in production), shows a disabled message.
++ *   - On 401 (wrong token), shows an inline error and lets the user retry.
++ * -------------------------------------------------------------------------
++ */
++
++import { useState } from "react";
++import { Loader2, ShieldCheck } from "lucide-react";
++import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
++import { Input } from "@/components/ui/input";
++import { Button } from "@/components/ui/button";
++import { useT } from "@/lib/i18n-store";
++
++interface AdminLoginProps {
++  open: boolean;
++  onAuthenticated: () => void;
++  onClose: () => void;
++}
++
++export function AdminLogin({ open, onAuthenticated, onClose }: AdminLoginProps) {
++  const t = useT();
++  const [token, setToken] = useState("");
++  const [status, setStatus] = useState<"idle" | "submitting" | "error" | "disabled">("idle");
++
++  async function handleSubmit(e: React.FormEvent) {
++    e.preventDefault();
++    if (!token.trim()) return;
++    setStatus("submitting");
++    try {
++      const res = await fetch("/api/admin/session", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ token: token.trim() }),
++      });
++      if (res.status === 503) {
++        setStatus("disabled");
++        return;
++      }
++      if (!res.ok) {
++        setStatus("error");
++        return;
++      }
++      // Success — cookie is set by the server. Notify parent.
++      onAuthenticated();
++    } catch {
++      setStatus("error");
++    }
++  }
++
++  return (
++    <Dialog
++      open={open}
++      onOpenChange={(o) => {
++        if (!o) onClose();
++      }}
++    >
++      <DialogContent className="glass-panel max-w-sm">
++        <DialogHeader>
++          <DialogTitle className="flex items-center gap-2">
++            <ShieldCheck className="h-4 w-4 text-teal-700" aria-hidden />
++            {t("admin.login.title")}
++          </DialogTitle>
++          <DialogDescription>{t("admin.login.body")}</DialogDescription>
++        </DialogHeader>
++
++        {status === "disabled" ? (
++          <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
++            {t("admin.login.disabled")}
++          </p>
++        ) : (
++          <form onSubmit={handleSubmit} className="space-y-3">
++            <Input
++              type="password"
++              autoFocus
++              autoComplete="off"
++              placeholder={t("admin.login.placeholder")}
++              value={token}
++              onChange={(e) => {
++                setToken(e.target.value);
++                if (status === "error") setStatus("idle");
++              }}
++              aria-invalid={status === "error"}
++              className="bg-background/70"
++            />
++            {status === "error" && (
++              <p className="text-sm text-destructive">{t("admin.login.error")}</p>
++            )}
++            <Button type="submit" disabled={status === "submitting" || !token.trim()} className="w-full">
++              {status === "submitting" ? (
++                <>
++                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
++                  {t("admin.login.submitting")}
++                </>
++              ) : (
++                t("admin.login.cta")
++              )}
++            </Button>
++          </form>
++        )}
++      </DialogContent>
++    </Dialog>
++  );
++}
+diff --git a/src/lib/api-helpers.ts b/src/lib/api-helpers.ts
+index 30d6302..a6674e7 100644
+--- a/src/lib/api-helpers.ts
++++ b/src/lib/api-helpers.ts
+@@ -236,21 +236,31 @@ export function sanitizeContent(raw: unknown, maxLen: number): string | null {
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// Admin auth (optional shared-secret gate)
++// Admin auth (shared-secret gate)
+ // ---------------------------------------------------------------------------
+ 
+ /**
+- * Optional admin authorisation gate. When the `ADMIN_SECRET_TOKEN` env var is
+- * set, the request must carry the matching token in either the
+- * `x-admin-token` header or the `admin_token` cookie. When the env var is
+- * unset (dev / pre-publish), the gate is a no-op and returns null (allow).
++ * Admin authorisation gate.
+  *
+- * Returns a 401 NextResponse when the token is required but missing/wrong,
+- * or null when the request is allowed.
++ *   - When `ADMIN_SECRET_TOKEN` is set: the request must carry the matching
++ *     token in either the `x-admin-token` header or the `admin_token` cookie
++ *     (the cookie is set by POST /api/admin/session on login).
++ *   - When `ADMIN_SECRET_TOKEN` is NOT set: DENY. The operator must set
++ *     `ADMIN_SECRET_TOKEN` in `.env` to enable the moderation dashboard.
++ *     We never auto-open admin in dev, because that leaks the dashboard to
++ *     every visitor in the preview.
++ *
++ * Returns a 401 NextResponse when access is denied, or null when allowed.
+  */
+ export function requireAdmin(req: NextRequest): NextResponse | null {
+   const expected = process.env.ADMIN_SECRET_TOKEN;
+-  if (!expected) return null; // gate disabled — dev / pre-publish
++  if (!expected) {
++    // No token configured — deny in every environment.
++    return NextResponse.json(
++      { error: "Admin access is not configured." },
++      { status: 503 },
++    );
++  }
+   const headerToken = req.headers.get("x-admin-token");
+   const cookieToken = req.cookies.get("admin_token")?.value;
+   if (headerToken === expected || cookieToken === expected) return null;
+diff --git a/src/lib/i18n-store.ts b/src/lib/i18n-store.ts
+index 6bb6e6e..50382fa 100644
+--- a/src/lib/i18n-store.ts
++++ b/src/lib/i18n-store.ts
+@@ -162,6 +162,15 @@ const STRINGS = {
+     "impact.poetic.feel_you": "{n} person felt you",
+     "impact.poetic.feel_you_plural": "{n} people felt you",
+     "impact.and": "and",
++    // --- Admin login (gated moderation dashboard) --------------------------
++    "admin.login.title": "Admin access",
++    "admin.login.body": "Enter the admin token to open the moderation queue.",
++    "admin.login.placeholder": "Admin token",
++    "admin.login.cta": "Unlock",
++    "admin.login.submitting": "Unlocking…",
++    "admin.login.error": "Invalid token. Try again.",
++    "admin.login.disabled": "Admin access is not configured on this deployment.",
++    "admin.logout": "Sign out",
+   },
+   ar: {
+     "app.title": "رسالة في زجاجة",
+@@ -294,6 +303,15 @@ const STRINGS = {
+     "impact.poetic.feel_you": "شعر بك {n} شخص",
+     "impact.poetic.feel_you_plural": "شعر بك {n} أشخاص",
+     "impact.and": "و",
++    // --- تسجيل دخول المشرف (لوحة المراجعة المحمية) -------------------------
++    "admin.login.title": "دخول المشرف",
++    "admin.login.body": "أدخل رمز المشرف لفتح قائمة المراجعة.",
++    "admin.login.placeholder": "رمز المشرف",
++    "admin.login.cta": "فتح",
++    "admin.login.submitting": "جارٍ الفتح…",
++    "admin.login.error": "رمز غير صحيح. حاول مرة أخرى.",
++    "admin.login.disabled": "دخول المشرف غير مُهيّأ على هذا النشر.",
++    "admin.logout": "خروج",
+   },
+ } as const;
+ 

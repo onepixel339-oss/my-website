@@ -236,21 +236,31 @@ export function sanitizeContent(raw: unknown, maxLen: number): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Admin auth (optional shared-secret gate)
+// Admin auth (shared-secret gate)
 // ---------------------------------------------------------------------------
 
 /**
- * Optional admin authorisation gate. When the `ADMIN_SECRET_TOKEN` env var is
- * set, the request must carry the matching token in either the
- * `x-admin-token` header or the `admin_token` cookie. When the env var is
- * unset (dev / pre-publish), the gate is a no-op and returns null (allow).
+ * Admin authorisation gate.
  *
- * Returns a 401 NextResponse when the token is required but missing/wrong,
- * or null when the request is allowed.
+ *   - When `ADMIN_SECRET_TOKEN` is set: the request must carry the matching
+ *     token in either the `x-admin-token` header or the `admin_token` cookie
+ *     (the cookie is set by POST /api/admin/session on login).
+ *   - When `ADMIN_SECRET_TOKEN` is NOT set: DENY. The operator must set
+ *     `ADMIN_SECRET_TOKEN` in `.env` to enable the moderation dashboard.
+ *     We never auto-open admin in dev, because that leaks the dashboard to
+ *     every visitor in the preview.
+ *
+ * Returns a 401 NextResponse when access is denied, or null when allowed.
  */
 export function requireAdmin(req: NextRequest): NextResponse | null {
   const expected = process.env.ADMIN_SECRET_TOKEN;
-  if (!expected) return null; // gate disabled — dev / pre-publish
+  if (!expected) {
+    // No token configured — deny in every environment.
+    return NextResponse.json(
+      { error: "Admin access is not configured." },
+      { status: 503 },
+    );
+  }
   const headerToken = req.headers.get("x-admin-token");
   const cookieToken = req.cookies.get("admin_token")?.value;
   if (headerToken === expected || cookieToken === expected) return null;
