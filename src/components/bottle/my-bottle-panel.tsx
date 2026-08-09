@@ -32,6 +32,7 @@ import { languageLabel } from "@/lib/language-detect";
 import { useI18n, useT } from "@/lib/i18n-store";
 import { FeelYouIcon } from "@/components/bottle/feel-you-icon";
 import { ImpactSummary } from "@/components/bottle/impact-summary";
+import { forgetBottle } from "@/lib/bottle-tokens-client";
 
 interface MyBottle {
   id: string;
@@ -86,6 +87,10 @@ export function MyBottlePanel({ token, onBack }: { token: string; onBack: () => 
       });
       if (res.status === 404) {
         setState({ kind: "notfound" });
+        // The bottle has drifted away (deleted / moderated / never existed).
+        // Remove the dead token from the saved-bottles list so the "My
+        // bottles" menu doesn't keep a link that goes nowhere.
+        forgetBottle(token);
         return;
       }
       if (!res.ok) throw new Error("fetch failed");

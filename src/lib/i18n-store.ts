@@ -100,6 +100,14 @@ const STRINGS = {
     "mybottle.retry": "Try again",
     "mybottle.heart": "Hearts",
     "mybottle.smile": "Smiles",
+    // --- My Bottles header menu (saved-token recovery) ---------------------
+    "mybottles.label": "My bottles",
+    "mybottles.empty": "You haven't cast a bottle yet on this device.",
+    "mybottles.open": "Open",
+    "mybottles.just_now": "just now",
+    "mybottles.min_ago": "{n} min ago",
+    "mybottles.h_ago": "{n} h ago",
+    "mybottles.d_ago": "{n} d ago",
     // --- Gentle rate-limit / anti-spam messages -----------------------------
     // Friendly, never raw HTTP errors. 🌊 keeps the oceanic voice.
     "error.rate_limited.throw.title": "That's enough bottles for now",
@@ -250,6 +258,14 @@ const STRINGS = {
     "mybottle.retry": "حاول مجددًا",
     "mybottle.heart": "قلوب",
     "mybottle.smile": "ابتسامات",
+    // --- قائمة زجاجاتي في الهيدر (استرجاع التوكن المحفوظ) ------------------
+    "mybottles.label": "زجاجاتي",
+    "mybottles.empty": "لم ترمِ زجاجة بعد على هذا الجهاز.",
+    "mybottles.open": "افتح",
+    "mybottles.just_now": "الآن",
+    "mybottles.min_ago": "منذ {n} دقيقة",
+    "mybottles.h_ago": "منذ {n} ساعة",
+    "mybottles.d_ago": "منذ {n} يوم",
     // --- رسائل حدّ المعدّل / مكافحة الإزعاج بلطف ----------------------------
     "error.rate_limited.throw.title": "يكفي زجاجات للآن",
     "error.rate_limited.throw.body":

@@ -40,6 +40,7 @@ import { LiveBottleCounter } from "@/components/bottle/live-bottle-counter";
 import { BottleComposer } from "@/components/bottle/bottle-composer";
 import { BottleFeed } from "@/components/bottle/bottle-feed";
 import { MyBottlePanel } from "@/components/bottle/my-bottle-panel";
+import { MyBottlesMenu } from "@/components/bottle/my-bottles-menu";
 import { WallOfGems } from "@/components/bottle/wall-of-gems";
 import { AdminReviewDashboard } from "@/components/exchange/admin-review";
 import { AdminLogin } from "@/components/exchange/admin-login";
@@ -188,6 +189,12 @@ export default function Home() {
               viewports, never these. */}
           <div className="flex shrink-0 items-center gap-2 sm:gap-3">
             <LiveBottleCounter />
+            {/* The author's saved bottles — a recovery path for the private
+                reading room. The token is auto-saved to localStorage on
+                every throw, so the author can always find their way back to
+                a bottle's reactions + replies even if they lost the one-time
+                link. Badge shows the count; empty when none saved yet. */}
+            <MyBottlesMenu />
             <LocaleToggle />
             <ThemeToggle />
             {/* Subtle admin entry point — a small shield icon. Visible to

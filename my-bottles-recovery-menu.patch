@@ -1,0 +1,417 @@
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index 1184caa..1a31e8a 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -40,6 +40,7 @@ import { LiveBottleCounter } from "@/components/bottle/live-bottle-counter";
+ import { BottleComposer } from "@/components/bottle/bottle-composer";
+ import { BottleFeed } from "@/components/bottle/bottle-feed";
+ import { MyBottlePanel } from "@/components/bottle/my-bottle-panel";
++import { MyBottlesMenu } from "@/components/bottle/my-bottles-menu";
+ import { WallOfGems } from "@/components/bottle/wall-of-gems";
+ import { AdminReviewDashboard } from "@/components/exchange/admin-review";
+ import { AdminLogin } from "@/components/exchange/admin-login";
+@@ -188,6 +189,12 @@ export default function Home() {
+               viewports, never these. */}
+           <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+             <LiveBottleCounter />
++            {/* The author's saved bottles — a recovery path for the private
++                reading room. The token is auto-saved to localStorage on
++                every throw, so the author can always find their way back to
++                a bottle's reactions + replies even if they lost the one-time
++                link. Badge shows the count; empty when none saved yet. */}
++            <MyBottlesMenu />
+             <LocaleToggle />
+             <ThemeToggle />
+             {/* Subtle admin entry point — a small shield icon. Visible to
+diff --git a/src/components/bottle/bottle-composer.tsx b/src/components/bottle/bottle-composer.tsx
+index 097da01..e1257b2 100644
+--- a/src/components/bottle/bottle-composer.tsx
++++ b/src/components/bottle/bottle-composer.tsx
+@@ -60,6 +60,7 @@ import {
+   type LanguagePref,
+ } from "@/components/bottle/language-pref-picker";
+ import { OutcomeBanner, type SubmitOutcome } from "@/components/bottle/outcome-banner";
++import { rememberBottle } from "@/lib/bottle-tokens-client";
+ 
+ // Composer limits (mirrored server-side in /api/messages).
+ const MAX_CONTENT = 500;
+@@ -334,6 +335,14 @@ export function BottleComposer({
+     setPrivateToken(pendingPrivateToken.current);
+     setActiveCapsuleDelay(pendingCapsuleDelay.current);
+     setManualHoldNotice(pendingManualHoldNotice.current);
++    // Persist the private token + a short content preview to localStorage so
++    // the author can always find their way back to this bottle's reactions
++    // via the "My bottles" menu in the header — even if they close the tab
++    // without copying the link. Captured BEFORE setContent("") clears it.
++    const token = pendingPrivateToken.current;
++    if (token) {
++      rememberBottle(token, content);
++    }
+     pendingReceived.current = null;
+     pendingPrivateToken.current = null;
+     pendingManualHoldNotice.current = null;
+diff --git a/src/components/bottle/my-bottle-panel.tsx b/src/components/bottle/my-bottle-panel.tsx
+index d77f87b..459f86c 100644
+--- a/src/components/bottle/my-bottle-panel.tsx
++++ b/src/components/bottle/my-bottle-panel.tsx
+@@ -32,6 +32,7 @@ import { languageLabel } from "@/lib/language-detect";
+ import { useI18n, useT } from "@/lib/i18n-store";
+ import { FeelYouIcon } from "@/components/bottle/feel-you-icon";
+ import { ImpactSummary } from "@/components/bottle/impact-summary";
++import { forgetBottle } from "@/lib/bottle-tokens-client";
+ 
+ interface MyBottle {
+   id: string;
+@@ -86,6 +87,10 @@ export function MyBottlePanel({ token, onBack }: { token: string; onBack: () =>
+       });
+       if (res.status === 404) {
+         setState({ kind: "notfound" });
++        // The bottle has drifted away (deleted / moderated / never existed).
++        // Remove the dead token from the saved-bottles list so the "My
++        // bottles" menu doesn't keep a link that goes nowhere.
++        forgetBottle(token);
+         return;
+       }
+       if (!res.ok) throw new Error("fetch failed");
+diff --git a/src/components/bottle/my-bottles-menu.tsx b/src/components/bottle/my-bottles-menu.tsx
+new file mode 100644
+index 0000000..6e19e32
+--- /dev/null
++++ b/src/components/bottle/my-bottles-menu.tsx
+@@ -0,0 +1,163 @@
++"use client";
++
++/**
++ * MyBottlesMenu
++ * ---------------------------------------------------------------------------
++ * A header dropdown that lists the author's own bottles (saved to localStorage
++ * at publish time by the composer). Each entry shows a short content preview
++ * + a relative timestamp; clicking it navigates to `/?bottle=<token>` which
++ * opens the private reading room (MyBottlePanel) showing that bottle's
++ * reactions + quick-word replies.
++ *
++ * WHY THIS EXISTS:
++ *   Previously the private revisit token was shown exactly once after a throw
++ *   and was never persisted. If the author closed the tab without copying the
++ *   link, they lost all access to their own bottle's reactions/replies. This
++ *   menu is the recovery path — the author can always find their way back.
++ *
++ * The button shows a small badge with the count of saved bottles. The menu
++ * re-reads localStorage every time it opens (so a bottle thrown in another tab
++ * appears immediately). Empty state: a gentle hint to cast a bottle first.
++ * ---------------------------------------------------------------------------
++ */
++
++import { useEffect, useState } from "react";
++import { Mail, ExternalLink, Inbox } from "lucide-react";
++import {
++  DropdownMenu,
++  DropdownMenuTrigger,
++  DropdownMenuContent,
++  DropdownMenuItem,
++  DropdownMenuLabel,
++  DropdownMenuSeparator,
++} from "@/components/ui/dropdown-menu";
++import { useI18n, useT } from "@/lib/i18n-store";
++import {
++  listSavedBottles,
++  bottleUrl,
++  type SavedBottle,
++} from "@/lib/bottle-tokens-client";
++
++/** Format a relative time string using the active locale's keys. */
++function relativeTime(createdAt: number, t: ReturnType<typeof useT>): string {
++  const diffMs = Date.now() - createdAt;
++  const diffMin = Math.floor(diffMs / 60_000);
++  if (diffMin < 1) return t("mybottles.just_now");
++  if (diffMin < 60) return t("mybottles.min_ago", { n: diffMin });
++  const diffH = Math.floor(diffMin / 60);
++  if (diffH < 24) return t("mybottles.h_ago", { n: diffH });
++  const diffD = Math.floor(diffH / 24);
++  return t("mybottles.d_ago", { n: diffD });
++}
++
++export function MyBottlesMenu() {
++  const t = useT();
++  const locale = useI18n((s) => s.locale);
++  const [bottles, setBottles] = useState<SavedBottle[]>([]);
++  const [open, setOpen] = useState(false);
++
++  // Re-read localStorage whenever the menu opens (so a bottle thrown in
++  // another tab shows up immediately) and on mount.
++  useEffect(() => {
++    if (!open) return;
++    // Reading from localStorage is a sync external source; the setState
++    // here mirrors that external state into React. Cascading renders are
++    // not a concern (this only runs on menu open / locale change).
++    // eslint-disable-next-line react-hooks/set-state-in-effect
++    setBottles(listSavedBottles());
++  }, [open, locale]);
++
++  // Also load once on mount so the badge count is correct on first paint
++  // (without waiting for the user to open the menu).
++  useEffect(() => {
++    // Initial hydration of client-only localStorage state into React.
++    // eslint-disable-next-line react-hooks/set-state-in-effect
++    setBottles(listSavedBottles());
++  }, []);
++
++  // Listen for storage events from other tabs so the badge updates live.
++  useEffect(() => {
++    function onStorage(e: StorageEvent) {
++      if (e.key === "bottle.tokens.v1") {
++        setBottles(listSavedBottles());
++      }
++    }
++    window.addEventListener("storage", onStorage);
++    return () => window.removeEventListener("storage", onStorage);
++  }, []);
++
++  const count = bottles.length;
++
++  return (
++    <DropdownMenu open={open} onOpenChange={setOpen}>
++      <DropdownMenuTrigger asChild>
++        <button
++          type="button"
++          aria-label={t("mybottles.label")}
++          title={t("mybottles.label")}
++          className={`glass-panel relative inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full border border-border/60 text-foreground transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 ${
++            count > 0 ? "text-teal-700" : "text-muted-foreground/60"
++          }`}
++        >
++          <Mail className="h-4 w-4" aria-hidden />
++          {count > 0 && (
++            <span
++              className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-600 px-1 text-[10px] font-bold leading-none text-white shadow-sm sm:right-0 sm:top-0"
++              aria-hidden
++            >
++              {count > 9 ? "9+" : count}
++            </span>
++          )}
++        </button>
++      </DropdownMenuTrigger>
++      <DropdownMenuContent
++        align="end"
++        sideOffset={6}
++        className="w-80 max-w-[calc(100vw-2rem)]"
++      >
++        <DropdownMenuLabel className="flex items-center justify-between">
++          <span>{t("mybottles.label")}</span>
++          {count > 0 && (
++            <span className="text-xs font-normal text-muted-foreground">
++              {count}
++            </span>
++          )}
++        </DropdownMenuLabel>
++        <DropdownMenuSeparator />
++        {count === 0 ? (
++          <div className="flex flex-col items-center gap-2 px-3 py-6 text-center">
++            <Inbox className="h-6 w-6 text-muted-foreground/50" aria-hidden />
++            <p className="text-xs leading-relaxed text-muted-foreground">
++              {t("mybottles.empty")}
++            </p>
++          </div>
++        ) : (
++          <div className="max-h-80 overflow-y-auto py-1">
++            {bottles.map((b) => (
++              <DropdownMenuItem
++                key={b.token}
++                asChild
++                className="cursor-pointer"
++              >
++                <a
++                  href={bottleUrl(b.token)}
++                  className="flex flex-col gap-1 px-2 py-2"
++                >
++                  <div className="flex items-start justify-between gap-2">
++                    <p className="line-clamp-2 min-w-0 flex-1 text-xs leading-relaxed text-foreground">
++                      {b.preview || "—"}
++                    </p>
++                    <ExternalLink className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground/60" aria-hidden />
++                  </div>
++                  <p className="text-[10px] text-muted-foreground/80" dir="ltr">
++                    {relativeTime(b.createdAt, t)}
++                  </p>
++                </a>
++              </DropdownMenuItem>
++            ))}
++          </div>
++        )}
++      </DropdownMenuContent>
++    </DropdownMenu>
++  );
++}
+diff --git a/src/lib/bottle-tokens-client.ts b/src/lib/bottle-tokens-client.ts
+new file mode 100644
+index 0000000..ca3b468
+--- /dev/null
++++ b/src/lib/bottle-tokens-client.ts
+@@ -0,0 +1,133 @@
++/**
++ * src/lib/bottle-tokens-client.ts
++ * ---------------------------------------------------------------------------
++ * CLIENT-SIDE persistence of the author's own bottle tokens.
++ *
++ * Problem this solves:
++ *   The exchange endpoint returns a `private_token` exactly ONCE at publish
++ *   time. Previously the only way to revisit your bottle (to see reactions
++ *   + quick-word replies) was to manually copy the `/?bottle=<token>` link
++ *   shown in the drifting section. If the author closed the tab without
++ *   copying it, access to their own bottle's reactions/replies was lost
++ *   forever — no cookie, no localStorage, no recovery path.
++ *
++ * Solution:
++ *   On every successful publish, the composer calls `rememberBottle()` with
++ *   the new token + a short content preview. We store up to N tokens in
++ *   localStorage (most-recent-first), so the author always has a way back
++ *   via the "My Bottles" menu in the header.
++ *
++ * Privacy:
++ *   - The token is the ONLY way to view a bottle's reactions. Storing it in
++ *     localStorage means anyone with access to THIS BROWSER can see those
++ *     reactions. That is the same trust model as the existing session cookie
++ *     and is acceptable for an anonymous, no-login app. The "Save your
++ *     bottle" panel already warns the author to keep the link private.
++ *   - We store ONLY the token + a 60-char preview + a timestamp. No message
++ *     body, no author identity.
++ *
++ * All functions are SSR-safe (no-op when `window` is undefined) so they can
++ * be imported from client components without guarding every call site.
++ * -------------------------------------------------------------------------
++ */
++
++const STORAGE_KEY = "bottle.tokens.v1";
++const MAX_BOTTLES = 20;
++const PREVIEW_MAX = 60;
++
++export interface SavedBottle {
++  /** The private token — possession = authorisation to view reactions. */
++  token: string;
++  /** Short content preview (≤60 chars) for the menu list. */
++  preview: string;
++  /** When the bottle was thrown (epoch ms). */
++  createdAt: number;
++}
++
++function isBrowser(): boolean {
++  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
++}
++
++function safeParse(raw: string | null): SavedBottle[] {
++  if (!raw) return [];
++  try {
++    const parsed = JSON.parse(raw);
++    if (!Array.isArray(parsed)) return [];
++    return parsed
++      .filter(
++        (x): x is SavedBottle =>
++          typeof x === "object" &&
++          x !== null &&
++          typeof (x as SavedBottle).token === "string" &&
++          typeof (x as SavedBottle).preview === "string" &&
++          typeof (x as SavedBottle).createdAt === "number",
++      )
++      .slice(0, MAX_BOTTLES);
++  } catch {
++    return [];
++  }
++}
++
++/**
++ * Read the list of saved bottles (most-recent-first).
++ * Returns [] on the server or if storage is empty/corrupt.
++ */
++export function listSavedBottles(): SavedBottle[] {
++  if (!isBrowser()) return [];
++  try {
++    return safeParse(window.localStorage.getItem(STORAGE_KEY));
++  } catch {
++    return [];
++  }
++}
++
++/**
++ * Persist a new bottle token. Dedupes by token, caps at MAX_BOTTLES
++ * (drops the oldest), and stores most-recent-first.
++ *
++ * @param token   The private revisit token.
++ * @param preview A short snippet of the message body (will be truncated).
++ */
++export function rememberBottle(token: string, preview: string): void {
++  if (!isBrowser()) return;
++  if (!token || !/^[A-Za-z0-9_-]{16,64}$/.test(token)) return;
++  const trimmedPreview = preview.trim().slice(0, PREVIEW_MAX);
++  const now = Date.now();
++
++  const existing = safeParse(window.localStorage.getItem(STORAGE_KEY));
++  // Drop any existing entry with the same token (idempotent re-save).
++  const filtered = existing.filter((b) => b.token !== token);
++  // Prepend the new one.
++  const next = [{ token, preview: trimmedPreview, createdAt: now }, ...filtered].slice(
++    0,
++    MAX_BOTTLES,
++  );
++  try {
++    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
++  } catch {
++    /* quota / privacy mode — silently no-op */
++  }
++}
++
++/**
++ * Remove a saved bottle by token. Used if the author visits a bottle link
++ * that turns out to be invalid (drifted away) so the menu doesn't keep a
++ * dead entry.
++ */
++export function forgetBottle(token: string): void {
++  if (!isBrowser()) return;
++  if (!token) return;
++  const existing = safeParse(window.localStorage.getItem(STORAGE_KEY));
++  const next = existing.filter((b) => b.token !== token);
++  try {
++    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
++  } catch {
++    /* ignore */
++  }
++}
++
++/** Build the deep-link URL for a token, relative to the current origin. */
++export function bottleUrl(token: string): string {
++  const origin = typeof window !== "undefined" ? window.location.origin : "";
++  return `${origin}/?bottle=${encodeURIComponent(token)}`;
++}
+diff --git a/src/lib/i18n-store.ts b/src/lib/i18n-store.ts
+index a443eba..e07c140 100644
+--- a/src/lib/i18n-store.ts
++++ b/src/lib/i18n-store.ts
+@@ -100,6 +100,14 @@ const STRINGS = {
+     "mybottle.retry": "Try again",
+     "mybottle.heart": "Hearts",
+     "mybottle.smile": "Smiles",
++    // --- My Bottles header menu (saved-token recovery) ---------------------
++    "mybottles.label": "My bottles",
++    "mybottles.empty": "You haven't cast a bottle yet on this device.",
++    "mybottles.open": "Open",
++    "mybottles.just_now": "just now",
++    "mybottles.min_ago": "{n} min ago",
++    "mybottles.h_ago": "{n} h ago",
++    "mybottles.d_ago": "{n} d ago",
+     // --- Gentle rate-limit / anti-spam messages -----------------------------
+     // Friendly, never raw HTTP errors. 🌊 keeps the oceanic voice.
+     "error.rate_limited.throw.title": "That's enough bottles for now",
+@@ -250,6 +258,14 @@ const STRINGS = {
+     "mybottle.retry": "حاول مجددًا",
+     "mybottle.heart": "قلوب",
+     "mybottle.smile": "ابتسامات",
++    // --- قائمة زجاجاتي في الهيدر (استرجاع التوكن المحفوظ) ------------------
++    "mybottles.label": "زجاجاتي",
++    "mybottles.empty": "لم ترمِ زجاجة بعد على هذا الجهاز.",
++    "mybottles.open": "افتح",
++    "mybottles.just_now": "الآن",
++    "mybottles.min_ago": "منذ {n} دقيقة",
++    "mybottles.h_ago": "منذ {n} ساعة",
++    "mybottles.d_ago": "منذ {n} يوم",
+     // --- رسائل حدّ المعدّل / مكافحة الإزعاج بلطف ----------------------------
+     "error.rate_limited.throw.title": "يكفي زجاجات للآن",
+     "error.rate_limited.throw.body":

@@ -60,6 +60,7 @@ import {
   type LanguagePref,
 } from "@/components/bottle/language-pref-picker";
 import { OutcomeBanner, type SubmitOutcome } from "@/components/bottle/outcome-banner";
+import { rememberBottle } from "@/lib/bottle-tokens-client";
 
 // Composer limits (mirrored server-side in /api/messages).
 const MAX_CONTENT = 500;
@@ -334,6 +335,14 @@ export function BottleComposer({
     setPrivateToken(pendingPrivateToken.current);
     setActiveCapsuleDelay(pendingCapsuleDelay.current);
     setManualHoldNotice(pendingManualHoldNotice.current);
+    // Persist the private token + a short content preview to localStorage so
+    // the author can always find their way back to this bottle's reactions
+    // via the "My bottles" menu in the header — even if they close the tab
+    // without copying the link. Captured BEFORE setContent("") clears it.
+    const token = pendingPrivateToken.current;
+    if (token) {
+      rememberBottle(token, content);
+    }
     pendingReceived.current = null;
     pendingPrivateToken.current = null;
     pendingManualHoldNotice.current = null;
