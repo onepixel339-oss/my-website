@@ -6,11 +6,11 @@
  *   POST /api/admin/review/[id]
  *     Body: { action: "approve" | "reject" | "resolve", note?: string }
  *
- *   - approve  : publish a pending_review message (is_hidden = false,
- *                status = published, publishedAt = now). The human overrides
- *                the borderline classification.
- *   - reject   : keep a pending_review / self_harm_blocked message hidden and
- *                mark it rejected.
+ *   - approve  : publish a flagged message (pending_review / self_harm_blocked /
+ *                rejected) — is_hidden = false, status = published,
+ *                publishedAt = now. The operator is the final arbiter; the
+ *                pipeline only FLAGS, it never auto-rejects.
+ *   - reject   : keep a flagged message hidden and mark it rejected.
  *   - resolve  : acknowledge a self_harm / rejected case without changing
  *                distribution (the author already received the appropriate
  *                response). Sets adminResolvedAt + optional note.
@@ -108,10 +108,13 @@ export async function POST(
     const now = new Date();
 
     if (action === "approve") {
-      // Only pending_review items can be approved into distribution.
-      if (existing.moderationStatus !== "pending_review") {
+      // Allow the admin to approve ANY non-published message: pending_review
+      // (borderline / severe / PII), self_harm_blocked, or even a previously
+      // rejected one. The operator is the final arbiter — the pipeline only
+      // FLAGS, it never auto-rejects.
+      if (existing.moderationStatus === "published") {
         return NextResponse.json(
-          { error: "Only messages awaiting review can be approved." },
+          { error: "Message is already published." },
           { status: 409 },
         );
       }
@@ -141,6 +144,8 @@ export async function POST(
     }
 
     if (action === "reject") {
+      // The admin can reject any non-published message (pending_review /
+      // self_harm_blocked / already-rejected — the latter just re-affirms).
       if (existing.moderationStatus === "published") {
         return NextResponse.json(
           {

@@ -126,7 +126,12 @@ export function BottleComposer({
   // Stashed capsule delay so the drift section can show "your bottle drifts
   // in in 7 days" even after the picker has been reset.
   const pendingCapsuleDelay = useRef<CapsuleDelay>("now");
+  // Stashed manual-hold notice: when the operator requires admin approval,
+  // the author still gets a received bottle, but we surface a small notice
+  // in the drift section that their own message is awaiting approval.
+  const pendingManualHoldNotice = useRef<string | null>(null);
   const [activeCapsuleDelay, setActiveCapsuleDelay] = useState<CapsuleDelay>("now");
+  const [manualHoldNotice, setManualHoldNotice] = useState<string | null>(null);
   const rippleId = useRef(0);
   const throwBtnRef = useRef<HTMLButtonElement | null>(null);
 
@@ -253,6 +258,24 @@ export function BottleComposer({
           break;
         }
         case "pending_review": {
+          // Manual-hold sub-case: the classifier scored the message as clean,
+          // but the operator requires admin approval. The author DID receive a
+          // bottle in return + a private token — treat it like "published" for
+          // the throw animation / received-bottle reveal, but surface a small
+          // notice that their own message is awaiting approval.
+          if (data.manual_hold === true) {
+            pendingReceived.current = (data.received as PublicBottle | null) ?? null;
+            pendingPrivateToken.current =
+              typeof data.private_token === "string" ? data.private_token : null;
+            pendingCapsuleDelay.current = capsuleDelay;
+            pendingManualHoldNotice.current =
+              typeof data.notice === "string" ? data.notice : null;
+            setPhase("throwing");
+            onPublished?.();
+            setQuotaRefresh((n) => n + 1);
+            break;
+          }
+          // Borderline hold (no received bottle). Just show the notice.
           setOutcome({ kind: "pending_review", notice: data.notice as string });
           setContent("");
           setCategory(null);
@@ -310,8 +333,10 @@ export function BottleComposer({
     setReceived(pendingReceived.current);
     setPrivateToken(pendingPrivateToken.current);
     setActiveCapsuleDelay(pendingCapsuleDelay.current);
+    setManualHoldNotice(pendingManualHoldNotice.current);
     pendingReceived.current = null;
     pendingPrivateToken.current = null;
+    pendingManualHoldNotice.current = null;
     setContent("");
     setCategory(null);
     // Reset the optional pickers so the next bottle starts fresh.
@@ -570,6 +595,23 @@ export function BottleComposer({
                 </Alert>
               </motion.div>
             )}
+            {/* Manual-approval notice — when the operator requires admin
+                approval, the author's own message is held for review even
+                though it was clean. Surface a calm heads-up so they know to
+                come back later (their bottle is NOT lost). */}
+            {manualHoldNotice && (
+              <motion.div
+                initial={reduced ? false : { opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: reduced ? 0 : 0.35, delay: reduced ? 0 : 0.16, ease: "easeOut" }}
+              >
+                <Alert className="border-amber-200 bg-amber-50/80 text-amber-900">
+                  <Clock className="h-4 w-4" aria-hidden />
+                  <AlertTitle>{t("drift.reviewTitle")}</AlertTitle>
+                  <AlertDescription>{manualHoldNotice}</AlertDescription>
+                </Alert>
+              </motion.div>
+            )}
             {privateToken && (
               <motion.div
                 initial={reduced ? false : { opacity: 0, y: 10 }}
@@ -595,6 +637,13 @@ export function BottleComposer({
             clears it or casts again. */}
         {phase === "idle" && received && (
           <div className="space-y-4 border-t border-border/50 p-6 sm:p-9">
+            {manualHoldNotice && (
+              <Alert className="border-amber-200 bg-amber-50/80 text-amber-900">
+                <Clock className="h-4 w-4" aria-hidden />
+                <AlertTitle>{t("drift.reviewTitle")}</AlertTitle>
+                <AlertDescription>{manualHoldNotice}</AlertDescription>
+              </Alert>
+            )}
             {privateToken && <SaveBottleLink token={privateToken} />}
             <ReceivedBottle bottle={received} onDismiss={() => setReceived(null)} />
           </div>

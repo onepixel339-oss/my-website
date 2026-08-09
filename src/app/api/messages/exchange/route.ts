@@ -51,6 +51,7 @@ import {
   buildSelfHarmSupportPayload,
   GENERIC_REJECTION_NOTICE,
   REVIEW_PENDING_NOTICE,
+  MANUAL_REVIEW_PENDING_NOTICE,
 } from "@/lib/moderation";
 import { filterMessage } from "@/lib/pii-filter";
 import { detectLanguage } from "@/lib/language-detect";
@@ -266,9 +267,38 @@ export async function POST(req: NextRequest) {
     // Cheap, synchronous, regex-based. Runs BEFORE the rate-limit so a
     // legitimate user who accidentally includes a phone number does NOT lose
     // a daily-throw slot (PII is a user error, not spam). On detection the
-    // submission is REJECTED — never stored, never moderated.
+    // submission is stored HIDDEN + pending_review for the admin to decide
+    // (the author is NOT told what was found, only that their message was
+    // held). The message is never auto-published — the admin must explicitly
+    // approve it if they want it to appear (e.g. after confirming the phone
+    // number is the author's own and they consent to sharing it).
     const pii = filterMessage(content);
     if (!pii.ok) {
+      await db.$transaction(async (tx) => {
+        const message = await tx.exchangeMessage.create({
+          data: {
+            authorId: session.hash,
+            authorHandle: pickAnonymousHandle(),
+            content,
+            category,
+            language: detectLanguage(content),
+            source: "bottle",
+            isHidden: true,
+            moderationStatus: "pending_review",
+            moderationFlagType: "doxxing",
+            moderationConfidence: 1,
+          },
+        });
+        await tx.moderationLog.create({
+          data: {
+            messageId: message.id,
+            flagType: "doxxing",
+            confidence: 1,
+            decision: "pending_review",
+            modelVersion: "pii-filter-v1",
+          },
+        });
+      });
       return finalizeResponse(
         req,
         session,
@@ -353,14 +383,19 @@ export async function POST(req: NextRequest) {
 
     // === MODERATION GATE ==================================================
     // Synchronous, BEFORE the INSERT. The exchange only proceeds to the read
-    // step when the decision is "publish". Other decisions store the message
-    // (hidden) and return the moderation outcome WITHOUT a received bottle.
+    // step when the decision is "publish" — OR when the message is a clean
+    // "manual hold" (pendingManualApproval): the classifier said it's fine,
+    // but the operator requires explicit approval before it joins the public
+    // feed. In that case the author STILL receives a bottle (their message is
+    // almost certainly fine); their own message is stored hidden+pending until
+    // the admin approves it.
     const moderation = await moderateMessage(content);
+    const manualHold = moderation.pendingManualApproval === true;
 
-    // Non-publish decisions: store (hidden) + return the moderation outcome.
-    // No bottle is handed back — the reward is aligned with a distributable
-    // contribution.
-    if (moderation.decision !== "publish") {
+    // Non-publish decisions that are NOT a manual hold: store (hidden) and
+    // return the moderation outcome WITHOUT a received bottle. These cover
+    // self_harm_block, reject, and borderline pending_review.
+    if (moderation.decision !== "publish" && !manualHold) {
       const moderationStatus = statusByDecision[moderation.decision];
 
       await db.$transaction(async (tx) => {
@@ -422,16 +457,28 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // === PUBLISH + RECIPROCAL UNLOCK (single transaction) =================
+    // === PUBLISH / MANUAL-HOLD + RECIPROCAL UNLOCK (single transaction) ===
     // Insert the author's message, then select + increment a random OTHER
     // bottle from the eligible pool. Both happen in one $transaction so the
     // write and the read are atomic.
+    //
+    // Two sub-cases reach this branch:
+    //   - decision === "publish": the message is published immediately
+    //     (is_hidden = false, moderationStatus = "published", publishedAt = now).
+    //   - manualHold (pendingManualApproval): the classifier scored the
+    //     message as clean, but the operator requires explicit admin approval.
+    //     The message is stored hidden+pending_review; the author STILL gets a
+    //     received bottle + private token. Once the admin approves it (POST
+    //     /api/admin/review/[id] { action: "approve" }), it flips to published
+    //     and joins the public feed.
     const language = detectLanguage(content);
 
     const result = await db.$transaction(async (tx) => {
       const ownPrivateToken = generatePrivateToken();
 
-      // (a) Insert the new published message.
+      // (a) Insert the new message. In manual-hold mode it is stored hidden
+      //     and pending so it never appears in the feed until the admin
+      //     approves it.
       const own = await tx.exchangeMessage.create({
         data: {
           authorId: session.hash,
@@ -440,11 +487,11 @@ export async function POST(req: NextRequest) {
           category,
           language,
           source: "bottle",
-          isHidden: false,
-          moderationStatus: "published",
+          isHidden: manualHold ? true : false,
+          moderationStatus: manualHold ? "pending_review" : "published",
           moderationFlagType: moderation.flagType,
           moderationConfidence: moderation.confidence,
-          publishedAt: new Date(),
+          publishedAt: manualHold ? null : new Date(),
           privateToken: ownPrivateToken,
           visibleAfter,
         },
@@ -476,8 +523,13 @@ export async function POST(req: NextRequest) {
       req,
       session,
       NextResponse.json({
-        status: "published",
+        status: manualHold ? "pending_review" : "published",
+        // Manual hold still distributes a received bottle to the author; the
+        // hold only affects whether the AUTHOR'S message is publicly visible.
         distributed: true,
+        manual_hold: manualHold ? true : undefined,
+        // Shown to the author when their clean message is held for review.
+        notice: manualHold ? MANUAL_REVIEW_PENDING_NOTICE : undefined,
         message: result.own,
         received: result.received,
         // The author's private revisit token. Returned EXACTLY ONCE.

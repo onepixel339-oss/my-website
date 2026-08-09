@@ -26,8 +26,9 @@
  *       supportive response with local (Egypt) + international crisis
  *       resources. It is also surfaced to admins for safety follow-up.
  *   - severe category (hate / harassment / sexual_minors / doxxing /
- *     graphic_violence) (>= SEVERE_THRESHOLD)     -> reject
- *       is_hidden = true, never distributed. Surfaces in admin queue.
+ *     graphic_violence) (>= SEVERE_THRESHOLD)     -> pending_review
+ *       is_hidden = true, never auto-distributed. Surfaces in admin queue
+ *       for the operator to decide (approve → publish, or reject).
  *   - any category (>= BORDERLINE_THRESHOLD but < SEVERE) -> pending_review
  *       Queued for lightweight human review; NOT auto-published.
  *   - otherwise                                     -> publish
@@ -79,6 +80,13 @@ export interface ModerationResult {
   modelVersion: string;
   /** True when the decision was reached via the fail-safe path. */
   degraded: boolean;
+  /**
+   * True when the message was classified as clean ("publish") but is held for
+   * manual admin approval because `REQUIRE_MANUAL_APPROVAL` is enabled. The
+   * caller should treat this like a pending_review decision, but still give
+   * the author a received bottle (their message is almost certainly fine).
+   */
+  pendingManualApproval?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +108,28 @@ export const BORDERLINE_THRESHOLD = 0.4;
 
 /** Hard cap on input length sent to the classifier (DoS + cost guard). */
 const MAX_INPUT_CHARS = 8000;
+
+/**
+ * Manual-approval mode.
+ *
+ * When `REQUIRE_MANUAL_APPROVAL` is enabled, every message that the classifier
+ * scores as clean is held for human review instead of being auto-published.
+ * The operator (admin) must explicitly approve it from the moderation
+ * dashboard before it appears in the public feed.
+ *
+ *   - Severe violations are STILL auto-rejected (the classifier + policy run
+ *     first; only the "publish" path is affected).
+ *   - Self-harm messages STILL get the supportive path immediately.
+ *   - Only clean ("publish") messages are rerouted to pending_review.
+ *
+ * DEFAULT IS OFF: clean messages auto-publish so the operator doesn't have to
+ * approve every single bottle. The admin review queue still catches borderline
+ * content, PII rejections, severe violations, and self-harm cases. Set
+ * `REQUIRE_MANUAL_APPROVAL=true` in the environment to require manual approval
+ * for every message.
+ */
+export const REQUIRE_MANUAL_APPROVAL =
+  process.env.REQUIRE_MANUAL_APPROVAL === "true";
 
 const SEVERE_CATEGORIES: Exclude<ModerationFlagType, "none">[] = [
   "hate_speech",
@@ -332,7 +362,11 @@ export function applyPolicy(
     };
   }
 
-  // 2) Severe categories at/above the severe threshold -> auto-reject.
+  // 2) Severe categories at/above the severe threshold -> send to admin
+  //    review. The operator decides whether to publish or reject; we never
+  //    auto-publish severe content, but we also don't auto-reject it — the
+  //    admin may overturn a false positive (e.g. news discussion flagged as
+  //    hate speech).
   let severeFlag: Exclude<ModerationFlagType, "none"> | null = null;
   let severeConf = 0;
   for (const cat of SEVERE_CATEGORIES) {
@@ -343,7 +377,7 @@ export function applyPolicy(
     }
   }
   if (severeFlag) {
-    return { decision: "reject", flagType: severeFlag, confidence: severeConf };
+    return { decision: "pending_review", flagType: severeFlag, confidence: severeConf };
   }
 
   // 3) Borderline: any category at/above borderline but below severe -> review.
@@ -429,6 +463,24 @@ export async function moderateMessage(content: string): Promise<ModerationResult
     };
   }
 
+  // --- Manual-approval mode ----------------------------------------------
+  // When enabled (the default), a clean "publish" decision is rerouted to
+  // pending_review so the admin must explicitly approve every message before
+  // it reaches the public feed. The caller can distinguish this from a
+  // borderline hold via `pendingManualApproval` and still give the author a
+  // received bottle (their message is almost certainly fine).
+  if (REQUIRE_MANUAL_APPROVAL && policy.decision === "publish") {
+    return {
+      decision: "pending_review",
+      flagType: "none",
+      confidence: 0,
+      scores,
+      modelVersion: MODEL_VERSION,
+      degraded: false,
+      pendingManualApproval: true,
+    };
+  }
+
   return {
     decision: policy.decision,
     flagType: policy.flagType,
@@ -469,3 +521,12 @@ export const GENERIC_REJECTION_NOTICE =
  */
 export const REVIEW_PENDING_NOTICE =
   "Thanks for your message. It's been held briefly for review and will appear once a moderator confirms it. This usually happens quickly.";
+
+/**
+ * Notice shown when a clean message is held for manual admin approval (i.e.
+ * `REQUIRE_MANUAL_APPROVAL` is enabled). The author DID receive a bottle in
+ * return — their message is almost certainly fine, it just needs a human nod
+ * before it joins the public feed.
+ */
+export const MANUAL_REVIEW_PENDING_NOTICE =
+  "Your bottle is drifting — you received one in return. Your message will appear in the sea once a moderator approves it (usually soon).";

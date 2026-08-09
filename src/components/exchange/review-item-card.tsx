@@ -181,7 +181,12 @@ export function ReviewItemCard({
   const flag = flagLabel(item.moderationFlagType);
   const status = statusLabel(item.moderationStatus);
   const isSelfHarm = item.moderationStatus === "self_harm_blocked";
-  const isPending = item.moderationStatus === "pending_review";
+  // The admin can approve/reject ANY message that is not yet published and
+  // not already resolved. This lets the operator overturn a self_harm_block
+  // or a previous rejection (e.g. a false positive), in addition to acting
+  // on pending_review items.
+  const isPending =
+    item.moderationStatus !== "published" && !item.adminResolvedAt;
   const conf =
     item.moderationConfidence != null
       ? `${Math.round(item.moderationConfidence * 100)}%`
