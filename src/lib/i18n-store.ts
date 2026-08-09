@@ -102,9 +102,9 @@ const STRINGS = {
     "mybottle.smile": "Smiles",
     // --- Gentle rate-limit / anti-spam messages -----------------------------
     // Friendly, never raw HTTP errors. 🌊 keeps the oceanic voice.
-    "error.rate_limited.throw.title": "That's enough bottles for today",
+    "error.rate_limited.throw.title": "That's enough bottles for now",
     "error.rate_limited.throw.body":
-      "You've thrown enough bottles for today — come back tomorrow 🌊",
+      "You've used all your bottles — a new one drifts back every 30 minutes 🌊",
     "error.rate_limited.reaction":
       "That's a lot of warmth for one hour — let the sea settle a little 🌊",
     "error.captcha.title": "One more try?",
@@ -115,13 +115,14 @@ const STRINGS = {
       "You just sent something very like that — let a different thought drift out.",
     "write.captcha.checking": "Checking the tide…",
     // --- Daily bottle cap indicator (feature 5) ---------------------------
-    // Makes the 5/24h rate limit feel like a feature, not a restriction.
+    // Makes the rate limit feel like a feature, not a restriction.
     // "n of m bottles left" — encourages thoughtful writing.
-    "quota.label": "Bottles left today",
+    "quota.label": "Bottles left",
     "quota.remaining": "{left} of {limit} bottles left",
-    "quota.last": "This is your last bottle today — make it count.",
-    "quota.none": "That's all for today — come back tomorrow 🌊",
-    "quota.refresh": "Refreshes at midnight",
+    "quota.last": "This is your last bottle for now — make it count.",
+    "quota.none": "That's all for now — a new one drifts back every 30 min 🌊",
+    "quota.refresh": "One bottle refills every 30 minutes",
+    "quota.next": "Next bottle in ~{min} min",
     // --- Time Capsule (feature 2) -----------------------------------------
     "capsule.label": "When should it drift in?",
     "capsule.optional": "optional",
@@ -250,9 +251,9 @@ const STRINGS = {
     "mybottle.heart": "قلوب",
     "mybottle.smile": "ابتسامات",
     // --- رسائل حدّ المعدّل / مكافحة الإزعاج بلطف ----------------------------
-    "error.rate_limited.throw.title": "يكفي زجاجات اليوم",
+    "error.rate_limited.throw.title": "يكفي زجاجات للآن",
     "error.rate_limited.throw.body":
-      "لقد ألقيت ما يكفي من الزجاجات اليوم — عُد غدًا 🌊",
+      "لقد استخدمت كل زجاجاتك — زجاجة جديدة تنجرف كل 30 دقيقة 🌊",
     "error.rate_limited.reaction":
       "هذا الكثير من الدفء في ساعة واحدة — دع البحر يهدأ قليلًا 🌊",
     "error.captcha.title": "محاولة أخرى؟",
@@ -263,11 +264,12 @@ const STRINGS = {
       "لقد أرسلت للتو شيئًا يشبه هذا كثيرًا — دع فكرة مختلفة تنجرف.",
     "write.captcha.checking": "نتفحّد الموج…",
     // --- مؤشر سقف الزجاجات اليومي (ميزة 5) ----------------------------------
-    "quota.label": "زجاجات متبقية اليوم",
+    "quota.label": "زجاجات متبقية",
     "quota.remaining": "بقيت {left} من {limit} زجاجات",
-    "quota.last": "هذه آخر زجاجة اليوم — اجعلها مميزة.",
-    "quota.none": "هذا كل شيء اليوم — عُد غدًا 🌊",
-    "quota.refresh": "يتجدد عند منتصف الليل",
+    "quota.last": "هذه آخر زجاجة للآن — اجعلها مميزة.",
+    "quota.none": "هذا كل شيء للآن — زجاجة جديدة تنجرف كل 30 دقيقة 🌊",
+    "quota.refresh": "تتجدد زجاجة كل 30 دقيقة",
+    "quota.next": "زجاجة جديدة خلال ~{min} دقيقة",
     // --- كبسولة الزمن (ميزة 2) ----------------------------------------------
     "capsule.label": "متى تنجرف؟",
     "capsule.optional": "اختياري",

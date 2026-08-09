@@ -18,12 +18,12 @@
  *                       legitimate user who accidentally includes a phone
  *                       number does NOT lose a daily-throw slot (PII is a
  *                       user error, not spam).
- *       3. Rate limit — 5 throws / 24h per session. Runs before the
- *                       expensive captcha / duplicate / moderation gates
- *                       so a flooding session is rejected cheaply. Later-
- *                       rejected attempts (captcha / duplicate / moderation)
- *                       DO count toward the daily quota (spam should consume
- *                       quota).
+ *       3. Rate limit — token bucket: 10 bottles, 1 refills every 30 min.
+ *                       Runs before the expensive captcha / duplicate /
+ *                       moderation gates so a flooding session is rejected
+ *                       cheaply. Later-rejected attempts (captcha /
+ *                       duplicate / moderation) DO count toward the quota
+ *                       (spam should consume quota).
  *       4. Captcha    — Cloudflare Turnstile (env-gated).
  *       5. Near-duplicate detection — Levenshtein against recent submissions.
  *       6. Moderation — synchronous LLM classifier. The exchange ONLY
@@ -311,12 +311,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // === RATE LIMIT (5 throws / 24h per session) ==========================
-    // Server-side sliding window (in-memory, race-free) + durable DB backstop.
-    // Runs after PII (so PII errors are free) but before the expensive captcha
-    // / duplicate / moderation gates. Later-rejected attempts (captcha /
-    // duplicate / moderation) DO count toward the daily quota — spam should
-    // consume quota. Returns a GENTLE 200 (never a raw 429).
+    // === RATE LIMIT (token bucket: 10 bottles, 1 refill / 30 min) ========
+    // Server-side rolling token bucket (in-memory, race-free) + durable DB
+    // backstop. Runs after PII (so PII errors are free) but before the
+    // expensive captcha / duplicate / moderation gates. Later-rejected
+    // attempts (captcha / duplicate / moderation) DO count toward the quota —
+    // spam should consume quota. Returns a GENTLE 200 (never a raw 429).
     const throwLimit = await consumeThrowAttempt(session.hash);
     if (!throwLimit.allowed) {
       return finalizeResponse(
@@ -327,7 +327,7 @@ export async function POST(req: NextRequest) {
           distributed: false,
           limit: throwLimit.limit,
           retry_after_ms: throwLimit.retryAfterMs,
-          notice: "You've thrown enough bottles for today — come back tomorrow 🌊",
+          notice: "You've used all your bottles — a new one drifts back every 30 minutes 🌊",
         }),
       );
     }

@@ -1,0 +1,69 @@
+diff --git a/src/lib/moderation.ts b/src/lib/moderation.ts
+index 660d76b..68b8ac1 100644
+--- a/src/lib/moderation.ts
++++ b/src/lib/moderation.ts
+@@ -33,9 +33,13 @@
+  *       Queued for lightweight human review; NOT auto-published.
+  *   - otherwise                                     -> publish
+  *
+- * Fail-safe: if the classifier is unavailable or returns unparseable output,
+- * the message is routed to `pending_review` (human review). We NEVER
+- * auto-publish when moderation cannot run.
++ * Fail-safe: if the classifier is unavailable or returns unparseable output
++ * (e.g. on Vercel where the z-ai-web-dev-sdk config file is not present),
++ * the message is PUBLISHED. The PII filter (regex-based) already ran before
++ * moderation and caught personal info. Holding every message when the
++ * classifier is down would make the app unusable for the operator. Set
++ * `MODERATION_FAIL_SAFE=review` in the environment to restore the old
++ * "hold everything when classifier is down" behaviour.
+  *
+  * Privacy: this module never returns, and the persisted audit log never
+  * stores, the specific words/phrases that triggered a flag. Only the flag
+@@ -442,23 +446,41 @@ export async function moderateMessage(content: string): Promise<ModerationResult
+       degraded = true;
+     }
+   } catch {
+-    // Classifier unavailable (network, auth, rate-limit, etc.).
+-    // NEVER auto-publish unmoderated content. Route to human review.
++    // Classifier unavailable (network, auth, rate-limit, missing config, etc.).
++    // This happens on deployments where the z-ai-web-dev-sdk config file is
++    // not present (e.g. Vercel). We PUBLISH the message instead of holding
++    // it — the PII filter already ran before moderation (catching phone
++    // numbers / emails / URLs), and holding every single message would make
++    // the app unusable for the operator. The admin can still spot-check
++    // published messages from the dashboard if needed.
+     scores = normalizeScores(null);
+     degraded = true;
+   }
+ 
+   const policy = applyPolicy(scores);
+ 
+-  // When the classifier itself failed, override a "publish" decision to
+-  // "pending_review" so a human always checks unmoderated content.
++  // When the classifier itself failed, PUBLISH the message. The PII filter
++  // (regex-based, runs before moderation) already caught personal info. We
++  // don't hold every message just because the classifier is down — that
++  // would make the app unusable. Set MODERATION_FAIL_SAFE=review to restore
++  // the old "hold everything when classifier is down" behaviour.
+   if (degraded && policy.decision === "publish") {
++    if (process.env.MODERATION_FAIL_SAFE === "review") {
++      return {
++        decision: "pending_review",
++        flagType: "none",
++        confidence: 0,
++        scores,
++        modelVersion: MODEL_VERSION,
++        degraded: true,
++      };
++    }
+     return {
+-      decision: "pending_review",
++      decision: "publish",
+       flagType: "none",
+       confidence: 0,
+       scores,
+-      modelVersion: MODEL_VERSION,
++      modelVersion: MODEL_VERSION + "-unmoderated",
+       degraded: true,
+     };
+   }

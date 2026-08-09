@@ -1,0 +1,434 @@
+diff --git a/src/app/api/admin/review/[id]/route.ts b/src/app/api/admin/review/[id]/route.ts
+index a635d82..ac36523 100644
+--- a/src/app/api/admin/review/[id]/route.ts
++++ b/src/app/api/admin/review/[id]/route.ts
+@@ -6,11 +6,11 @@
+  *   POST /api/admin/review/[id]
+  *     Body: { action: "approve" | "reject" | "resolve", note?: string }
+  *
+- *   - approve  : publish a pending_review message (is_hidden = false,
+- *                status = published, publishedAt = now). The human overrides
+- *                the borderline classification.
+- *   - reject   : keep a pending_review / self_harm_blocked message hidden and
+- *                mark it rejected.
++ *   - approve  : publish a flagged message (pending_review / self_harm_blocked /
++ *                rejected) — is_hidden = false, status = published,
++ *                publishedAt = now. The operator is the final arbiter; the
++ *                pipeline only FLAGS, it never auto-rejects.
++ *   - reject   : keep a flagged message hidden and mark it rejected.
+  *   - resolve  : acknowledge a self_harm / rejected case without changing
+  *                distribution (the author already received the appropriate
+  *                response). Sets adminResolvedAt + optional note.
+@@ -108,10 +108,13 @@ export async function POST(
+     const now = new Date();
+ 
+     if (action === "approve") {
+-      // Only pending_review items can be approved into distribution.
+-      if (existing.moderationStatus !== "pending_review") {
++      // Allow the admin to approve ANY non-published message: pending_review
++      // (borderline / severe / PII), self_harm_blocked, or even a previously
++      // rejected one. The operator is the final arbiter — the pipeline only
++      // FLAGS, it never auto-rejects.
++      if (existing.moderationStatus === "published") {
+         return NextResponse.json(
+-          { error: "Only messages awaiting review can be approved." },
++          { error: "Message is already published." },
+           { status: 409 },
+         );
+       }
+@@ -141,6 +144,8 @@ export async function POST(
+     }
+ 
+     if (action === "reject") {
++      // The admin can reject any non-published message (pending_review /
++      // self_harm_blocked / already-rejected — the latter just re-affirms).
+       if (existing.moderationStatus === "published") {
+         return NextResponse.json(
+           {
+diff --git a/src/app/api/messages/exchange/route.ts b/src/app/api/messages/exchange/route.ts
+index 637b4fe..65c14cd 100644
+--- a/src/app/api/messages/exchange/route.ts
++++ b/src/app/api/messages/exchange/route.ts
+@@ -51,6 +51,7 @@ import {
+   buildSelfHarmSupportPayload,
+   GENERIC_REJECTION_NOTICE,
+   REVIEW_PENDING_NOTICE,
++  MANUAL_REVIEW_PENDING_NOTICE,
+ } from "@/lib/moderation";
+ import { filterMessage } from "@/lib/pii-filter";
+ import { detectLanguage } from "@/lib/language-detect";
+@@ -266,9 +267,38 @@ export async function POST(req: NextRequest) {
+     // Cheap, synchronous, regex-based. Runs BEFORE the rate-limit so a
+     // legitimate user who accidentally includes a phone number does NOT lose
+     // a daily-throw slot (PII is a user error, not spam). On detection the
+-    // submission is REJECTED — never stored, never moderated.
++    // submission is stored HIDDEN + pending_review for the admin to decide
++    // (the author is NOT told what was found, only that their message was
++    // held). The message is never auto-published — the admin must explicitly
++    // approve it if they want it to appear (e.g. after confirming the phone
++    // number is the author's own and they consent to sharing it).
+     const pii = filterMessage(content);
+     if (!pii.ok) {
++      await db.$transaction(async (tx) => {
++        const message = await tx.exchangeMessage.create({
++          data: {
++            authorId: session.hash,
++            authorHandle: pickAnonymousHandle(),
++            content,
++            category,
++            language: detectLanguage(content),
++            source: "bottle",
++            isHidden: true,
++            moderationStatus: "pending_review",
++            moderationFlagType: "doxxing",
++            moderationConfidence: 1,
++          },
++        });
++        await tx.moderationLog.create({
++          data: {
++            messageId: message.id,
++            flagType: "doxxing",
++            confidence: 1,
++            decision: "pending_review",
++            modelVersion: "pii-filter-v1",
++          },
++        });
++      });
+       return finalizeResponse(
+         req,
+         session,
+@@ -353,14 +383,19 @@ export async function POST(req: NextRequest) {
+ 
+     // === MODERATION GATE ==================================================
+     // Synchronous, BEFORE the INSERT. The exchange only proceeds to the read
+-    // step when the decision is "publish". Other decisions store the message
+-    // (hidden) and return the moderation outcome WITHOUT a received bottle.
++    // step when the decision is "publish" — OR when the message is a clean
++    // "manual hold" (pendingManualApproval): the classifier said it's fine,
++    // but the operator requires explicit approval before it joins the public
++    // feed. In that case the author STILL receives a bottle (their message is
++    // almost certainly fine); their own message is stored hidden+pending until
++    // the admin approves it.
+     const moderation = await moderateMessage(content);
++    const manualHold = moderation.pendingManualApproval === true;
+ 
+-    // Non-publish decisions: store (hidden) + return the moderation outcome.
+-    // No bottle is handed back — the reward is aligned with a distributable
+-    // contribution.
+-    if (moderation.decision !== "publish") {
++    // Non-publish decisions that are NOT a manual hold: store (hidden) and
++    // return the moderation outcome WITHOUT a received bottle. These cover
++    // self_harm_block, reject, and borderline pending_review.
++    if (moderation.decision !== "publish" && !manualHold) {
+       const moderationStatus = statusByDecision[moderation.decision];
+ 
+       await db.$transaction(async (tx) => {
+@@ -422,16 +457,28 @@ export async function POST(req: NextRequest) {
+       );
+     }
+ 
+-    // === PUBLISH + RECIPROCAL UNLOCK (single transaction) =================
++    // === PUBLISH / MANUAL-HOLD + RECIPROCAL UNLOCK (single transaction) ===
+     // Insert the author's message, then select + increment a random OTHER
+     // bottle from the eligible pool. Both happen in one $transaction so the
+     // write and the read are atomic.
++    //
++    // Two sub-cases reach this branch:
++    //   - decision === "publish": the message is published immediately
++    //     (is_hidden = false, moderationStatus = "published", publishedAt = now).
++    //   - manualHold (pendingManualApproval): the classifier scored the
++    //     message as clean, but the operator requires explicit admin approval.
++    //     The message is stored hidden+pending_review; the author STILL gets a
++    //     received bottle + private token. Once the admin approves it (POST
++    //     /api/admin/review/[id] { action: "approve" }), it flips to published
++    //     and joins the public feed.
+     const language = detectLanguage(content);
+ 
+     const result = await db.$transaction(async (tx) => {
+       const ownPrivateToken = generatePrivateToken();
+ 
+-      // (a) Insert the new published message.
++      // (a) Insert the new message. In manual-hold mode it is stored hidden
++      //     and pending so it never appears in the feed until the admin
++      //     approves it.
+       const own = await tx.exchangeMessage.create({
+         data: {
+           authorId: session.hash,
+@@ -440,11 +487,11 @@ export async function POST(req: NextRequest) {
+           category,
+           language,
+           source: "bottle",
+-          isHidden: false,
+-          moderationStatus: "published",
++          isHidden: manualHold ? true : false,
++          moderationStatus: manualHold ? "pending_review" : "published",
+           moderationFlagType: moderation.flagType,
+           moderationConfidence: moderation.confidence,
+-          publishedAt: new Date(),
++          publishedAt: manualHold ? null : new Date(),
+           privateToken: ownPrivateToken,
+           visibleAfter,
+         },
+@@ -476,8 +523,13 @@ export async function POST(req: NextRequest) {
+       req,
+       session,
+       NextResponse.json({
+-        status: "published",
++        status: manualHold ? "pending_review" : "published",
++        // Manual hold still distributes a received bottle to the author; the
++        // hold only affects whether the AUTHOR'S message is publicly visible.
+         distributed: true,
++        manual_hold: manualHold ? true : undefined,
++        // Shown to the author when their clean message is held for review.
++        notice: manualHold ? MANUAL_REVIEW_PENDING_NOTICE : undefined,
+         message: result.own,
+         received: result.received,
+         // The author's private revisit token. Returned EXACTLY ONCE.
+diff --git a/src/components/bottle/bottle-composer.tsx b/src/components/bottle/bottle-composer.tsx
+index b32ebcd..097da01 100644
+--- a/src/components/bottle/bottle-composer.tsx
++++ b/src/components/bottle/bottle-composer.tsx
+@@ -126,7 +126,12 @@ export function BottleComposer({
+   // Stashed capsule delay so the drift section can show "your bottle drifts
+   // in in 7 days" even after the picker has been reset.
+   const pendingCapsuleDelay = useRef<CapsuleDelay>("now");
++  // Stashed manual-hold notice: when the operator requires admin approval,
++  // the author still gets a received bottle, but we surface a small notice
++  // in the drift section that their own message is awaiting approval.
++  const pendingManualHoldNotice = useRef<string | null>(null);
+   const [activeCapsuleDelay, setActiveCapsuleDelay] = useState<CapsuleDelay>("now");
++  const [manualHoldNotice, setManualHoldNotice] = useState<string | null>(null);
+   const rippleId = useRef(0);
+   const throwBtnRef = useRef<HTMLButtonElement | null>(null);
+ 
+@@ -253,6 +258,24 @@ export function BottleComposer({
+           break;
+         }
+         case "pending_review": {
++          // Manual-hold sub-case: the classifier scored the message as clean,
++          // but the operator requires admin approval. The author DID receive a
++          // bottle in return + a private token — treat it like "published" for
++          // the throw animation / received-bottle reveal, but surface a small
++          // notice that their own message is awaiting approval.
++          if (data.manual_hold === true) {
++            pendingReceived.current = (data.received as PublicBottle | null) ?? null;
++            pendingPrivateToken.current =
++              typeof data.private_token === "string" ? data.private_token : null;
++            pendingCapsuleDelay.current = capsuleDelay;
++            pendingManualHoldNotice.current =
++              typeof data.notice === "string" ? data.notice : null;
++            setPhase("throwing");
++            onPublished?.();
++            setQuotaRefresh((n) => n + 1);
++            break;
++          }
++          // Borderline hold (no received bottle). Just show the notice.
+           setOutcome({ kind: "pending_review", notice: data.notice as string });
+           setContent("");
+           setCategory(null);
+@@ -310,8 +333,10 @@ export function BottleComposer({
+     setReceived(pendingReceived.current);
+     setPrivateToken(pendingPrivateToken.current);
+     setActiveCapsuleDelay(pendingCapsuleDelay.current);
++    setManualHoldNotice(pendingManualHoldNotice.current);
+     pendingReceived.current = null;
+     pendingPrivateToken.current = null;
++    pendingManualHoldNotice.current = null;
+     setContent("");
+     setCategory(null);
+     // Reset the optional pickers so the next bottle starts fresh.
+@@ -570,6 +595,23 @@ export function BottleComposer({
+                 </Alert>
+               </motion.div>
+             )}
++            {/* Manual-approval notice — when the operator requires admin
++                approval, the author's own message is held for review even
++                though it was clean. Surface a calm heads-up so they know to
++                come back later (their bottle is NOT lost). */}
++            {manualHoldNotice && (
++              <motion.div
++                initial={reduced ? false : { opacity: 0, y: 10 }}
++                animate={{ opacity: 1, y: 0 }}
++                transition={{ duration: reduced ? 0 : 0.35, delay: reduced ? 0 : 0.16, ease: "easeOut" }}
++              >
++                <Alert className="border-amber-200 bg-amber-50/80 text-amber-900">
++                  <Clock className="h-4 w-4" aria-hidden />
++                  <AlertTitle>{t("drift.reviewTitle")}</AlertTitle>
++                  <AlertDescription>{manualHoldNotice}</AlertDescription>
++                </Alert>
++              </motion.div>
++            )}
+             {privateToken && (
+               <motion.div
+                 initial={reduced ? false : { opacity: 0, y: 10 }}
+@@ -595,6 +637,13 @@ export function BottleComposer({
+             clears it or casts again. */}
+         {phase === "idle" && received && (
+           <div className="space-y-4 border-t border-border/50 p-6 sm:p-9">
++            {manualHoldNotice && (
++              <Alert className="border-amber-200 bg-amber-50/80 text-amber-900">
++                <Clock className="h-4 w-4" aria-hidden />
++                <AlertTitle>{t("drift.reviewTitle")}</AlertTitle>
++                <AlertDescription>{manualHoldNotice}</AlertDescription>
++              </Alert>
++            )}
+             {privateToken && <SaveBottleLink token={privateToken} />}
+             <ReceivedBottle bottle={received} onDismiss={() => setReceived(null)} />
+           </div>
+diff --git a/src/components/exchange/review-item-card.tsx b/src/components/exchange/review-item-card.tsx
+index 6216eb3..7666402 100644
+--- a/src/components/exchange/review-item-card.tsx
++++ b/src/components/exchange/review-item-card.tsx
+@@ -181,7 +181,12 @@ export function ReviewItemCard({
+   const flag = flagLabel(item.moderationFlagType);
+   const status = statusLabel(item.moderationStatus);
+   const isSelfHarm = item.moderationStatus === "self_harm_blocked";
+-  const isPending = item.moderationStatus === "pending_review";
++  // The admin can approve/reject ANY message that is not yet published and
++  // not already resolved. This lets the operator overturn a self_harm_block
++  // or a previous rejection (e.g. a false positive), in addition to acting
++  // on pending_review items.
++  const isPending =
++    item.moderationStatus !== "published" && !item.adminResolvedAt;
+   const conf =
+     item.moderationConfidence != null
+       ? `${Math.round(item.moderationConfidence * 100)}%`
+diff --git a/src/lib/i18n-store.ts b/src/lib/i18n-store.ts
+index 50382fa..4d15eea 100644
+--- a/src/lib/i18n-store.ts
++++ b/src/lib/i18n-store.ts
+@@ -63,6 +63,7 @@ const STRINGS = {
+     "reveal.found": "Found {n}×",
+     "drift.title": "Your bottle is drifting out to sea",
+     "drift.body": "It passed moderation and is now floating for someone to find.",
++    "drift.reviewTitle": "Awaiting moderator approval",
+     "sea.heading": "Bottles in the sea",
+     "sea.refresh": "Refresh",
+     "sea.empty": "The sea is calm. Cast the first bottle.",
+@@ -211,6 +212,7 @@ const STRINGS = {
+     "reveal.found": "وُجدت {n}×",
+     "drift.title": "زجاجتك تنجرف إلى البحر",
+     "drift.body": "اجتازت الإشراف وهي الآن طافية ليجدها أحدهم.",
++    "drift.reviewTitle": "بانتظار موافقة المشرف",
+     "sea.heading": "زجاجات في البحر",
+     "sea.refresh": "تحديث",
+     "sea.empty": "البحر هادئ. ألقِ أول زجاجة.",
+diff --git a/src/lib/moderation.ts b/src/lib/moderation.ts
+index b0966dc..660d76b 100644
+--- a/src/lib/moderation.ts
++++ b/src/lib/moderation.ts
+@@ -26,8 +26,9 @@
+  *       supportive response with local (Egypt) + international crisis
+  *       resources. It is also surfaced to admins for safety follow-up.
+  *   - severe category (hate / harassment / sexual_minors / doxxing /
+- *     graphic_violence) (>= SEVERE_THRESHOLD)     -> reject
+- *       is_hidden = true, never distributed. Surfaces in admin queue.
++ *     graphic_violence) (>= SEVERE_THRESHOLD)     -> pending_review
++ *       is_hidden = true, never auto-distributed. Surfaces in admin queue
++ *       for the operator to decide (approve → publish, or reject).
+  *   - any category (>= BORDERLINE_THRESHOLD but < SEVERE) -> pending_review
+  *       Queued for lightweight human review; NOT auto-published.
+  *   - otherwise                                     -> publish
+@@ -79,6 +80,13 @@ export interface ModerationResult {
+   modelVersion: string;
+   /** True when the decision was reached via the fail-safe path. */
+   degraded: boolean;
++  /**
++   * True when the message was classified as clean ("publish") but is held for
++   * manual admin approval because `REQUIRE_MANUAL_APPROVAL` is enabled. The
++   * caller should treat this like a pending_review decision, but still give
++   * the author a received bottle (their message is almost certainly fine).
++   */
++  pendingManualApproval?: boolean;
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -101,6 +109,28 @@ export const BORDERLINE_THRESHOLD = 0.4;
+ /** Hard cap on input length sent to the classifier (DoS + cost guard). */
+ const MAX_INPUT_CHARS = 8000;
+ 
++/**
++ * Manual-approval mode.
++ *
++ * When `REQUIRE_MANUAL_APPROVAL` is enabled, every message that the classifier
++ * scores as clean is held for human review instead of being auto-published.
++ * The operator (admin) must explicitly approve it from the moderation
++ * dashboard before it appears in the public feed.
++ *
++ *   - Severe violations are STILL auto-rejected (the classifier + policy run
++ *     first; only the "publish" path is affected).
++ *   - Self-harm messages STILL get the supportive path immediately.
++ *   - Only clean ("publish") messages are rerouted to pending_review.
++ *
++ * DEFAULT IS OFF: clean messages auto-publish so the operator doesn't have to
++ * approve every single bottle. The admin review queue still catches borderline
++ * content, PII rejections, severe violations, and self-harm cases. Set
++ * `REQUIRE_MANUAL_APPROVAL=true` in the environment to require manual approval
++ * for every message.
++ */
++export const REQUIRE_MANUAL_APPROVAL =
++  process.env.REQUIRE_MANUAL_APPROVAL === "true";
++
+ const SEVERE_CATEGORIES: Exclude<ModerationFlagType, "none">[] = [
+   "hate_speech",
+   "harassment",
+@@ -332,7 +362,11 @@ export function applyPolicy(
+     };
+   }
+ 
+-  // 2) Severe categories at/above the severe threshold -> auto-reject.
++  // 2) Severe categories at/above the severe threshold -> send to admin
++  //    review. The operator decides whether to publish or reject; we never
++  //    auto-publish severe content, but we also don't auto-reject it — the
++  //    admin may overturn a false positive (e.g. news discussion flagged as
++  //    hate speech).
+   let severeFlag: Exclude<ModerationFlagType, "none"> | null = null;
+   let severeConf = 0;
+   for (const cat of SEVERE_CATEGORIES) {
+@@ -343,7 +377,7 @@ export function applyPolicy(
+     }
+   }
+   if (severeFlag) {
+-    return { decision: "reject", flagType: severeFlag, confidence: severeConf };
++    return { decision: "pending_review", flagType: severeFlag, confidence: severeConf };
+   }
+ 
+   // 3) Borderline: any category at/above borderline but below severe -> review.
+@@ -429,6 +463,24 @@ export async function moderateMessage(content: string): Promise<ModerationResult
+     };
+   }
+ 
++  // --- Manual-approval mode ----------------------------------------------
++  // When enabled (the default), a clean "publish" decision is rerouted to
++  // pending_review so the admin must explicitly approve every message before
++  // it reaches the public feed. The caller can distinguish this from a
++  // borderline hold via `pendingManualApproval` and still give the author a
++  // received bottle (their message is almost certainly fine).
++  if (REQUIRE_MANUAL_APPROVAL && policy.decision === "publish") {
++    return {
++      decision: "pending_review",
++      flagType: "none",
++      confidence: 0,
++      scores,
++      modelVersion: MODEL_VERSION,
++      degraded: false,
++      pendingManualApproval: true,
++    };
++  }
++
+   return {
+     decision: policy.decision,
+     flagType: policy.flagType,
+@@ -469,3 +521,12 @@ export const GENERIC_REJECTION_NOTICE =
+  */
+ export const REVIEW_PENDING_NOTICE =
+   "Thanks for your message. It's been held briefly for review and will appear once a moderator confirms it. This usually happens quickly.";
++
++/**
++ * Notice shown when a clean message is held for manual admin approval (i.e.
++ * `REQUIRE_MANUAL_APPROVAL` is enabled). The author DID receive a bottle in
++ * return — their message is almost certainly fine, it just needs a human nod
++ * before it joins the public feed.
++ */
++export const MANUAL_REVIEW_PENDING_NOTICE =
++  "Your bottle is drifting — you received one in return. Your message will appear in the sea once a moderator approves it (usually soon).";

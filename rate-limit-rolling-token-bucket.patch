@@ -1,0 +1,928 @@
+diff --git a/src/app/api/messages/exchange/route.ts b/src/app/api/messages/exchange/route.ts
+index 65c14cd..4789269 100644
+--- a/src/app/api/messages/exchange/route.ts
++++ b/src/app/api/messages/exchange/route.ts
+@@ -18,12 +18,12 @@
+  *                       legitimate user who accidentally includes a phone
+  *                       number does NOT lose a daily-throw slot (PII is a
+  *                       user error, not spam).
+- *       3. Rate limit — 5 throws / 24h per session. Runs before the
+- *                       expensive captcha / duplicate / moderation gates
+- *                       so a flooding session is rejected cheaply. Later-
+- *                       rejected attempts (captcha / duplicate / moderation)
+- *                       DO count toward the daily quota (spam should consume
+- *                       quota).
++ *       3. Rate limit — token bucket: 10 bottles, 1 refills every 30 min.
++ *                       Runs before the expensive captcha / duplicate /
++ *                       moderation gates so a flooding session is rejected
++ *                       cheaply. Later-rejected attempts (captcha /
++ *                       duplicate / moderation) DO count toward the quota
++ *                       (spam should consume quota).
+  *       4. Captcha    — Cloudflare Turnstile (env-gated).
+  *       5. Near-duplicate detection — Levenshtein against recent submissions.
+  *       6. Moderation — synchronous LLM classifier. The exchange ONLY
+@@ -311,12 +311,12 @@ export async function POST(req: NextRequest) {
+       );
+     }
+ 
+-    // === RATE LIMIT (5 throws / 24h per session) ==========================
+-    // Server-side sliding window (in-memory, race-free) + durable DB backstop.
+-    // Runs after PII (so PII errors are free) but before the expensive captcha
+-    // / duplicate / moderation gates. Later-rejected attempts (captcha /
+-    // duplicate / moderation) DO count toward the daily quota — spam should
+-    // consume quota. Returns a GENTLE 200 (never a raw 429).
++    // === RATE LIMIT (token bucket: 10 bottles, 1 refill / 30 min) ========
++    // Server-side rolling token bucket (in-memory, race-free) + durable DB
++    // backstop. Runs after PII (so PII errors are free) but before the
++    // expensive captcha / duplicate / moderation gates. Later-rejected
++    // attempts (captcha / duplicate / moderation) DO count toward the quota —
++    // spam should consume quota. Returns a GENTLE 200 (never a raw 429).
+     const throwLimit = await consumeThrowAttempt(session.hash);
+     if (!throwLimit.allowed) {
+       return finalizeResponse(
+@@ -327,7 +327,7 @@ export async function POST(req: NextRequest) {
+           distributed: false,
+           limit: throwLimit.limit,
+           retry_after_ms: throwLimit.retryAfterMs,
+-          notice: "You've thrown enough bottles for today — come back tomorrow 🌊",
++          notice: "You've used all your bottles — a new one drifts back every 30 minutes 🌊",
+         }),
+       );
+     }
+diff --git a/src/app/api/throw-quota/route.ts b/src/app/api/throw-quota/route.ts
+index 4465238..cab570f 100644
+--- a/src/app/api/throw-quota/route.ts
++++ b/src/app/api/throw-quota/route.ts
+@@ -2,30 +2,34 @@
+  * src/app/api/throw-quota/route.ts
+  * ---------------------------------------------------------------------------
+  *   GET /api/throw-quota
+- *     Returns how many bottle throws the current anonymous session has left
+- *     in the rolling 24h window, so the UI can render a friendly
+- *     "2 of 5 bottles left" indicator beside the composer.
++ *     Returns how many bottle throws the current anonymous session has left,
++ *     using a ROLLING token-bucket model (capacity 10, 1 refill / 30 min),
++ *     so the UI can render a friendly "2 of 10 bottles left" indicator beside
++ *     the composer — plus a "next bottle in ~N min" hint.
+  *
+  *     Response:
+  *       {
+- *         limit:          5,
+- *         used:           number,   // limit - remaining (attempts consumed)
+- *         remaining:      number,   // >= 0
+- *         window_ms:      86400000,
+- *         retry_after_ms: number    // 0 when remaining > 0
++ *         limit:             10,
++ *         used:              number,   // limit - remaining (attempts consumed)
++ *         remaining:         number,   // >= 0 (whole bottles available now)
++ *         refill_interval_ms:1800000,  // 30 min — time per bottle
++ *         next_refill_ms:    number,   // ms until the next bottle drips in
++ *                                      //   (0 when at full capacity)
++ *         retry_after_ms:    number    // 0 when remaining > 0; otherwise
++ *                                      //   same as next_refill_ms
+  *       }
+  *
+  *     The peek is NON-CONSUMING: calling this endpoint does NOT spend an
+  *     attempt. It returns the TIGHTER of two views:
+- *       1. The in-memory sliding window (`rate-limit.ts`) — counts every
+- *          attempt in the last 24h, INCLUDING ones later rejected by PII /
++ *       1. The in-memory token bucket (`rate-limit.ts`) — counts every
++ *          attempt in the last 5h, INCLUDING ones later rejected by PII /
+  *          captcha / duplicate / moderation gates and never stored. So the
+  *          indicator reflects "attempts consumed" rather than only "bottles
+  *          successfully published".
+- *       2. The durable DB backstop — a COUNT of this session's stored
+- *          ExchangeMessage rows with createdAt >= now - 24h. This survives
+- *          server restarts (when the in-memory window is wiped), so the
+- *          quota stays durable even after a deploy.
++ *       2. The durable DB backstop — reconstructs the bucket by SIMULATING
++ *          over this session's stored ExchangeMessage rows with createdAt
++ *          >= now - 5h. This survives server restarts (when the in-memory
++ *          bucket is wiped), so the quota stays durable even after a deploy.
+  *
+  *     A first-time visitor (no `bottle_session` cookie) gets a freshly
+  *     generated session token set on the response — identical to the
+@@ -43,7 +47,8 @@ import { NextRequest, NextResponse } from "next/server";
+ import { getSessionFromRequest } from "@/lib/anonymous-session";
+ import {
+   peekThrowRemaining,
+-  THROW_WINDOW_MS,
++  REFILL_INTERVAL_MS,
++  THROW_LIMIT,
+ } from "@/lib/rate-limit";
+ import { finalizeResponse, serverErrorResponse } from "@/lib/api-helpers";
+ 
+@@ -54,17 +59,28 @@ export async function GET(req: NextRequest) {
+   const session = getSessionFromRequest(req);
+ 
+   try {
+-    // Non-consuming peek — does NOT push to the in-memory window and does NOT
++    // Non-consuming peek — does NOT push to the in-memory bucket and does NOT
+     // insert into the DB. Returns the tighter of (in-memory remaining,
+     // DB-backstop remaining).
+     const result = await peekThrowRemaining(session.hash);
+ 
++    // When the user has bottles left but is below full capacity, the next
++    // bottle drips in `next_refill_ms`. When blocked (remaining === 0),
++    // next_refill_ms === retry_after_ms.
++    const nextRefillMs =
++      result.remaining >= THROW_LIMIT
++        ? 0
++        : result.retryAfterMs > 0
++          ? result.retryAfterMs
++          : REFILL_INTERVAL_MS; // at a whole-number boundary; next drip ~30min away
++
+     const res = NextResponse.json(
+       {
+         limit: result.limit,
+         used: Math.max(0, result.limit - result.remaining),
+         remaining: result.remaining,
+-        window_ms: THROW_WINDOW_MS,
++        refill_interval_ms: REFILL_INTERVAL_MS,
++        next_refill_ms: nextRefillMs,
+         retry_after_ms: result.retryAfterMs,
+       },
+       {
+diff --git a/src/components/bottle/throw-quota-indicator.tsx b/src/components/bottle/throw-quota-indicator.tsx
+index 37aa7e5..e1a5348 100644
+--- a/src/components/bottle/throw-quota-indicator.tsx
++++ b/src/components/bottle/throw-quota-indicator.tsx
+@@ -3,16 +3,20 @@
+ /**
+  * ThrowQuotaIndicator
+  * ---------------------------------------------------------------------------
+- * A gentle "X of 5 bottles left today" pill shown beside the composer. It
+- * reframes the 5/24h rate limit as a feature (encouraging thoughtful writing)
++ * A gentle "X of N bottles left" pill shown beside the composer. It
++ * reframes the rate limit as a feature (encouraging thoughtful writing)
+  * rather than a restriction.
+  *
+- *   - Polls GET /api/throw-quota on mount and after each publish (via the
+- *     `refreshSignal` prop, bumped by the parent when a bottle is cast).
+- *   - Shows a warm amber dot + "2 of 5 bottles left".
+- *   - When only 1 remains: "This is your last bottle today — make it count."
+- *   - When 0 remain: "That's all for today — come back tomorrow 🌊".
++ * Rolling token-bucket model:
++ *   - Capacity 10, 1 bottle refills every 30 minutes.
++ *   - When partially used, shows "Next bottle in ~N min".
++ *   - When only 1 remains: "This is your last bottle for now — make it count."
++ *   - When 0 remain: "That's all for now — a new one drifts back every 30 min 🌊".
+  *   - A subtle progress bar visualises the remaining fraction.
++ *   - A live countdown ticks down every minute while the tab is visible.
++ *
++ *   - Polls GET /api/throw-quota on mount, after each publish (via the
++ *     `refreshSignal` prop), and on tab re-focus.
+  *   - Fully localised (EN + AR). The pill stays low-chrome so it never
+  *     competes with the writing nook.
+  * ---------------------------------------------------------------------------
+@@ -26,6 +30,13 @@ interface QuotaState {
+   limit: number;
+   used: number;
+   remaining: number;
++  nextRefillMs: number;
++}
++
++/** Format a millisecond duration as "~N min" (or "~1 hr" for >= 60 min). */
++function formatMinutes(ms: number): number {
++  if (ms <= 0) return 0;
++  return Math.max(1, Math.round(ms / 60_000));
+ }
+ 
+ export function ThrowQuotaIndicator({
+@@ -36,17 +47,22 @@ export function ThrowQuotaIndicator({
+ }) {
+   const t = useT();
+   const [quota, setQuota] = useState<QuotaState | null>(null);
++  const [quotaAnchor, setQuotaAnchor] = useState(0);
+ 
+   const load = useCallback(async () => {
+     try {
+       const res = await fetch("/api/throw-quota", { cache: "no-store" });
+       if (!res.ok) return;
+-      const data = (await res.json()) as QuotaState;
++      const data = (await res.json()) as QuotaState & {
++        next_refill_ms?: number;
++      };
+       setQuota({
+         limit: data.limit,
+         used: data.used,
+         remaining: data.remaining,
++        nextRefillMs: data.next_refill_ms ?? 0,
+       });
++      setQuotaAnchor(Date.now());
+     } catch {
+       /* silent — the pill is decorative, not critical */
+     }
+@@ -71,6 +87,15 @@ export function ThrowQuotaIndicator({
+     return () => document.removeEventListener("visibilitychange", onVisibility);
+   }, [load]);
+ 
++  // Live countdown: tick the "next bottle in ~N min" hint every minute while
++  // the tab is visible and there's a pending refill.
++  const [now, setNow] = useState(() => Date.now());
++  useEffect(() => {
++    if (!quota || quota.nextRefillMs <= 0) return;
++    const id = setInterval(() => setNow(Date.now()), 30_000);
++    return () => clearInterval(id);
++  }, [quota]);
++
+   if (!quota) {
+     // Skeleton: a faint pill so the layout doesn't jump when it loads.
+     return (
+@@ -79,7 +104,15 @@ export function ThrowQuotaIndicator({
+   }
+ 
+   const { remaining, limit } = quota;
+-  const fraction = limit > 0 ? remaining / limit : 0;
++
++  // Compute the live remaining-ms until next bottle from the fetch anchor.
++  // We don't know the exact fetch time, so approximate: count down from the
++  // server-reported nextRefillMs minus elapsed since last load.
++  const elapsedSinceLoad = Math.max(0, now - quotaAnchor);
++  const liveNextRefillMs = Math.max(0, quota.nextRefillMs - elapsedSinceLoad);
++  const nextMin = formatMinutes(liveNextRefillMs);
++  const showCountdown =
++    remaining < limit && remaining > 0 && liveNextRefillMs > 0;
+ 
+   // Tone shifts from teal (plenty) → amber (last) → rose (none).
+   const tone =
+@@ -106,7 +139,13 @@ export function ThrowQuotaIndicator({
+     <div
+       role="status"
+       aria-label={ariaLabel}
+-      title={t("quota.refresh")}
++      title={
++        remaining === 0
++          ? t("quota.none")
++          : showCountdown
++            ? t("quota.next", { min: nextMin })
++            : t("quota.refresh")
++      }
+       className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium ${tone}`}
+     >
+       <span className={`inline-block h-1.5 w-1.5 rounded-full ${dotColor}`} aria-hidden />
+@@ -124,7 +163,7 @@ export function ThrowQuotaIndicator({
+           </span>
+         </span>
+       )}
+-      {/* A tiny inline progress bar — 5 segments, one per bottle. */}
++      {/* A tiny inline progress bar — one dot per bottle. */}
+       <span className="flex items-center gap-0.5" aria-hidden>
+         {Array.from({ length: limit }, (_, i) => (
+           <span
+@@ -139,6 +178,15 @@ export function ThrowQuotaIndicator({
+           />
+         ))}
+       </span>
++      {/* Live "next bottle in ~N min" hint — only when partially used. */}
++      {showCountdown && (
++        <span className="hidden items-center gap-1 sm:flex" aria-hidden>
++          <Clock className="h-3 w-3" aria-hidden />
++          <span className="tabular-nums opacity-80">
++            {t("quota.next", { min: nextMin })}
++          </span>
++        </span>
++      )}
+     </div>
+   );
+ }
+diff --git a/src/lib/i18n-store.ts b/src/lib/i18n-store.ts
+index 4d15eea..a443eba 100644
+--- a/src/lib/i18n-store.ts
++++ b/src/lib/i18n-store.ts
+@@ -102,9 +102,9 @@ const STRINGS = {
+     "mybottle.smile": "Smiles",
+     // --- Gentle rate-limit / anti-spam messages -----------------------------
+     // Friendly, never raw HTTP errors. 🌊 keeps the oceanic voice.
+-    "error.rate_limited.throw.title": "That's enough bottles for today",
++    "error.rate_limited.throw.title": "That's enough bottles for now",
+     "error.rate_limited.throw.body":
+-      "You've thrown enough bottles for today — come back tomorrow 🌊",
++      "You've used all your bottles — a new one drifts back every 30 minutes 🌊",
+     "error.rate_limited.reaction":
+       "That's a lot of warmth for one hour — let the sea settle a little 🌊",
+     "error.captcha.title": "One more try?",
+@@ -115,13 +115,14 @@ const STRINGS = {
+       "You just sent something very like that — let a different thought drift out.",
+     "write.captcha.checking": "Checking the tide…",
+     // --- Daily bottle cap indicator (feature 5) ---------------------------
+-    // Makes the 5/24h rate limit feel like a feature, not a restriction.
++    // Makes the rate limit feel like a feature, not a restriction.
+     // "n of m bottles left" — encourages thoughtful writing.
+-    "quota.label": "Bottles left today",
++    "quota.label": "Bottles left",
+     "quota.remaining": "{left} of {limit} bottles left",
+-    "quota.last": "This is your last bottle today — make it count.",
+-    "quota.none": "That's all for today — come back tomorrow 🌊",
+-    "quota.refresh": "Refreshes at midnight",
++    "quota.last": "This is your last bottle for now — make it count.",
++    "quota.none": "That's all for now — a new one drifts back every 30 min 🌊",
++    "quota.refresh": "One bottle refills every 30 minutes",
++    "quota.next": "Next bottle in ~{min} min",
+     // --- Time Capsule (feature 2) -----------------------------------------
+     "capsule.label": "When should it drift in?",
+     "capsule.optional": "optional",
+@@ -250,9 +251,9 @@ const STRINGS = {
+     "mybottle.heart": "قلوب",
+     "mybottle.smile": "ابتسامات",
+     // --- رسائل حدّ المعدّل / مكافحة الإزعاج بلطف ----------------------------
+-    "error.rate_limited.throw.title": "يكفي زجاجات اليوم",
++    "error.rate_limited.throw.title": "يكفي زجاجات للآن",
+     "error.rate_limited.throw.body":
+-      "لقد ألقيت ما يكفي من الزجاجات اليوم — عُد غدًا 🌊",
++      "لقد استخدمت كل زجاجاتك — زجاجة جديدة تنجرف كل 30 دقيقة 🌊",
+     "error.rate_limited.reaction":
+       "هذا الكثير من الدفء في ساعة واحدة — دع البحر يهدأ قليلًا 🌊",
+     "error.captcha.title": "محاولة أخرى؟",
+@@ -263,11 +264,12 @@ const STRINGS = {
+       "لقد أرسلت للتو شيئًا يشبه هذا كثيرًا — دع فكرة مختلفة تنجرف.",
+     "write.captcha.checking": "نتفحّد الموج…",
+     // --- مؤشر سقف الزجاجات اليومي (ميزة 5) ----------------------------------
+-    "quota.label": "زجاجات متبقية اليوم",
++    "quota.label": "زجاجات متبقية",
+     "quota.remaining": "بقيت {left} من {limit} زجاجات",
+-    "quota.last": "هذه آخر زجاجة اليوم — اجعلها مميزة.",
+-    "quota.none": "هذا كل شيء اليوم — عُد غدًا 🌊",
+-    "quota.refresh": "يتجدد عند منتصف الليل",
++    "quota.last": "هذه آخر زجاجة للآن — اجعلها مميزة.",
++    "quota.none": "هذا كل شيء للآن — زجاجة جديدة تنجرف كل 30 دقيقة 🌊",
++    "quota.refresh": "تتجدد زجاجة كل 30 دقيقة",
++    "quota.next": "زجاجة جديدة خلال ~{min} دقيقة",
+     // --- كبسولة الزمن (ميزة 2) ----------------------------------------------
+     "capsule.label": "متى تنجرف؟",
+     "capsule.optional": "اختياري",
+diff --git a/src/lib/rate-limit.ts b/src/lib/rate-limit.ts
+index f46cb22..eb04c67 100644
+--- a/src/lib/rate-limit.ts
++++ b/src/lib/rate-limit.ts
+@@ -1,32 +1,37 @@
+ /**
+  * src/lib/rate-limit.ts
+  * ---------------------------------------------------------------------------
+- * Server-side sliding-window rate limiting for the bottle app.
++ * Server-side TOKEN-BUCKET (rolling) rate limiting for the bottle app.
+  *
+- *   - Bottle throws: 5 per 24 hours per anonymous session hash.
+- *   - Reactions:    10 per 1 hour  per anonymous session hash.
++ *   - Bottle throws:  capacity 10, 1 token refills every 30 minutes.
++ *   - Reactions:      10 per 1 hour per anonymous session hash (in-memory
++ *                     fixed window — short, not worth a bucket).
+  *
+- * The spec suggests "Upstash Redis sliding-window OR a Postgres function
+- * checking recent rows". This stack is SQLite + Prisma with no Redis, so we
+- * use an in-process sliding-window limiter (the canonical in-memory analogue
+- * of a Redis sliding window) for the hot path, plus a **DB backstop** for the
+- * long 24h throw window so a server restart cannot reset a spammer's daily
+- * quota (the DB already records every stored submission with `authorId` =
+- * the session hash). The 1h reaction window is in-memory only — it is short
+- * enough that a restart reset is inconsequential, and there is no reaction
+- * event log table to backstop against.
++ * Rolling / token-bucket semantics (what the user asked for):
+  *
+- * Race safety: the in-memory check+record (`consumeMemory`) is fully
+- * SYNCHRONOUS, so it is atomic w.r.t. the Node event loop — two concurrent
+- * requests cannot both pass the check before either records. The async DB
+- * backstop runs after the atomic memory step and can only ADD restrictions
+- * (block more), never relax them, so it introduces no race of its own.
++ *   - The bucket holds at most 10 tokens (= 10 bottles).
++ *   - Every 30 minutes, 1 token drips back into the bucket.
++ *   - Throwing a bottle consumes 1 token.
++ *   - If you throw all 10 at once, you get the 1st back after 30 min, the
++ *     2nd after 60 min, … the 10th (full) after 5 hours.
++ *   - If you throw slowly (one every 30+ min) you effectively never run out.
+  *
+- * Durability caveat: in-memory state is per-process. On a horizontally scaled
+- * deployment each instance would enforce its own window; for this app's
+- * single-instance threat model (engagement surfaces, not security-critical)
+- * that is acceptable. The DB backstop makes the 24h throw quota durable
+- * regardless.
++ * This is NOT a fixed window (where all 10 refill at once). Each bottle
++ * regenerates on its own drip schedule, so the refill is gradual.
++ *
++ * Implementation:
++ *   - In-memory: per-key { tokens, lastRefill }. tokens is a FLOAT so
++ *     fractional regeneration accumulates between calls. The check+record
++ *     is fully SYNCHRONOUS → race-free w.r.t. the Node event loop.
++ *   - DB backstop (throws only): reconstructs the token count by SIMULATING
++ *     the bucket over this session's stored submissions in the last 5h.
++ *     This survives server restarts (when the in-memory bucket is wiped).
++ *
++ * Race safety: the in-memory check+record is synchronous, so two concurrent
++ * requests cannot both pass before either records.
++ *
++ * Durability caveat: in-memory state is per-process. The DB backstop makes
++ * the throw quota durable regardless of restarts.
+  * -------------------------------------------------------------------------
+  */
+ 
+@@ -36,8 +41,16 @@ import { db } from "@/lib/db";
+ // Limits & windows
+ // ---------------------------------------------------------------------------
+ 
+-export const THROW_LIMIT = 5;
+-export const THROW_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
++/** Maximum bottles a session can hold at once. */
++export const THROW_LIMIT = 10;
++/** Time to regenerate ONE bottle (30 minutes). */
++export const REFILL_INTERVAL_MS = 30 * 60 * 1000; // 30 min
++/**
++ * Total window = capacity × interval = 5h. Used by the DB backstop to decide
++ * how far back to look for stored submissions. A submission older than this
++ * can no longer affect the token count (its slot has fully regenerated).
++ */
++export const THROW_WINDOW_MS = THROW_LIMIT * REFILL_INTERVAL_MS; // 5h
+ 
+ export const REACTION_LIMIT = 10;
+ export const REACTION_WINDOW_MS = 60 * 60 * 1000; // 1h
+@@ -46,52 +59,70 @@ export interface RateLimitResult {
+   allowed: boolean;
+   /** The ceiling this limiter enforces. */
+   limit: number;
+-  /** How many attempts remain in the window (0 when blocked). */
++  /** How many whole bottles remain (0 when blocked). */
+   remaining: number;
+-  /** Ms until the oldest event in the window expires (only meaningful when
+-   *  blocked; 0 when allowed). */
++  /** Ms until the next bottle refills (only meaningful when blocked; 0
++   *  when allowed). */
+   retryAfterMs: number;
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// In-memory sliding-window store
++// In-memory token-bucket store
+ // ---------------------------------------------------------------------------
+ 
+-/** Map<key, sorted-epoch-ms-timestamps>. Timestamps are pushed in order. */
+-const windows = new Map<string, number[]>();
++/** Per-key token bucket: current (fractional) token count + last drip time. */
++interface TokenBucket {
++  tokens: number;
++  lastRefill: number;
++}
++
++/** Map<key, TokenBucket>. */
++const buckets = new Map<string, TokenBucket>();
+ /** Cap distinct keys so a flood of sessions can't grow it without bound. */
+ const MAX_KEYS = 20_000;
+ 
+ /**
+- * Drop timestamps older than the window for `key`, returning the survivors.
+- * Also performs a lazy global sweep when the key count gets large.
++ * Lazy global sweep: drop entries whose bucket is full (nothing useful to
++ * remember — a fresh bucket would start full anyway). Called inline when
++ * the map gets large.
+  */
+-function pruneKey(key: string, now: number, windowMs: number): number[] {
+-  const cutoff = now - windowMs;
+-  const arr = (windows.get(key) ?? []).filter((t) => t > cutoff);
+-  if (arr.length === 0) {
+-    windows.delete(key);
+-  } else {
+-    windows.set(key, arr);
+-  }
+-  // Lazy global sweep: if the map is huge, drop fully-expired keys.
+-  if (windows.size > MAX_KEYS) {
+-    for (const [k, ts] of windows) {
+-      const live = ts.filter((t) => t > now - THROW_WINDOW_MS);
+-      if (live.length === 0) windows.delete(k);
+-      else windows.set(k, live);
++function maybeSweep(now: number): void {
++  if (buckets.size <= MAX_KEYS) return;
++  for (const [k, entry] of buckets) {
++    // If the bucket would be completely full by now, forget it.
++    const fullAt = entry.lastRefill + (THROW_LIMIT - entry.tokens) * REFILL_INTERVAL_MS;
++    if (fullAt <= now) {
++      buckets.delete(k);
+     }
+   }
+-  return arr;
+ }
+ 
+ /**
+- * Atomic synchronous check+record for an in-memory sliding window.
++ * Regenerate tokens based on elapsed time, capping at the limit.
++ * Mutates the bucket in place and returns it.
++ */
++function refill(bucket: TokenBucket, limit: number, intervalMs: number, now: number): TokenBucket {
++  if (bucket.tokens >= limit) {
++    bucket.lastRefill = now;
++    return bucket;
++  }
++  const elapsed = now - bucket.lastRefill;
++  if (elapsed > 0) {
++    const dripped = elapsed / intervalMs;
++    bucket.tokens = Math.min(limit, bucket.tokens + dripped);
++    bucket.lastRefill = now;
++  }
++  return bucket;
++}
++
++/**
++ * Atomic synchronous check+record for an in-memory token bucket.
+  *
+- *   - Counts timestamps in the window (peek).
+- *   - If count >= limit → BLOCKED (no record added; blocked attempts don't
+- *     consume a slot).
+- *   - Else → records this attempt now and returns allowed.
++ *   - If no bucket exists → start full (tokens = limit) and regenerate is
++ *     a no-op. Consume 1 if limit >= 1.
++ *   - Regenerate based on elapsed time since lastRefill.
++ *   - If tokens >= 1 → consume 1, ALLOW, remaining = floor(tokens).
++ *   - Else → BLOCK, remaining = 0, retryAfterMs = ceil((1 - tokens) * interval).
+  *
+  * Because this function is synchronous, it cannot be interleaved with another
+  * call by the Node event loop — the check+record is race-free.
+@@ -99,47 +130,108 @@ function pruneKey(key: string, now: number, windowMs: number): number[] {
+ function consumeMemory(
+   key: string,
+   limit: number,
+-  windowMs: number,
++  intervalMs: number,
+   now = Date.now(),
+ ): RateLimitResult {
+-  const arr = pruneKey(key, now, windowMs);
+-  if (arr.length >= limit) {
+-    const oldest = arr[0] ?? now;
++  maybeSweep(now);
++  let entry = buckets.get(key);
++
++  if (!entry) {
++    entry = { tokens: limit, lastRefill: now };
++    buckets.set(key, entry);
++  } else {
++    refill(entry, limit, intervalMs, now);
++  }
++
++  if (entry.tokens >= 1) {
++    entry.tokens -= 1;
++    const remaining = Math.floor(entry.tokens);
+     return {
+-      allowed: false,
++      allowed: true,
+       limit,
+-      remaining: 0,
+-      retryAfterMs: Math.max(0, oldest + windowMs - now),
++      remaining,
++      retryAfterMs: 0,
+     };
+   }
+-  arr.push(now);
+-  windows.set(key, arr);
++
++  // Blocked — time until the next whole bottle.
++  const retryAfterMs = Math.ceil((1 - entry.tokens) * intervalMs);
+   return {
+-    allowed: true,
++    allowed: false,
+     limit,
+-    remaining: limit - arr.length,
+-    retryAfterMs: 0,
++    remaining: 0,
++    retryAfterMs,
+   };
+ }
+ 
+-/** Peek-only count (no record). Used by tests / diagnostics. */
+-function countInWindow(key: string, windowMs: number, now = Date.now()): number {
+-  return pruneKey(key, now, windowMs).length;
++/**
++ * Peek (WITHOUT consuming) the remaining bottles for a key.
++ * Used by the quota indicator so the UI can show "7 of 10 left" without
++ * spending a bottle. Also reports when the next bottle drips in.
++ */
++function peekMemory(
++  key: string,
++  limit: number,
++  intervalMs: number,
++  now = Date.now(),
++): RateLimitResult {
++  const entry = buckets.get(key);
++
++  if (!entry) {
++    // No bucket → full quota, no pending drip.
++    return { allowed: true, limit, remaining: limit, retryAfterMs: 0 };
++  }
++
++  refill(entry, limit, intervalMs, now);
++
++  const remaining = Math.floor(entry.tokens);
++  if (remaining >= 1) {
++    return { allowed: true, limit, remaining, retryAfterMs: 0 };
++  }
++
++  // Empty but a fraction is regenerating — report when the next whole bottle
++  // arrives.
++  const retryAfterMs = Math.ceil((1 - entry.tokens) * intervalMs);
++  return {
++    allowed: false,
++    limit,
++    remaining: 0,
++    retryAfterMs,
++  };
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// Reactions — in-memory only (short 1h window)
++// Reactions — in-memory only (short 1h fixed window)
+ // ---------------------------------------------------------------------------
+ 
+ /**
+  * Consume a reaction attempt. 10 per hour per session. In-memory only.
++ * Uses a simple fixed window — reactions are low-stakes and short-lived.
+  */
+ export function consumeReactionAttempt(sessionHash: string): RateLimitResult {
+-  return consumeMemory(
+-    `react:${sessionHash}`,
+-    REACTION_LIMIT,
+-    REACTION_WINDOW_MS,
+-  );
++  return consumeReactionFixedWindow(`react:${sessionHash}`);
++}
++
++// Tiny fixed-window helper reused for reactions (kept inline to avoid
++// confusing it with the token-bucket throw limiter).
++const reactionWindows = new Map<string, { windowStart: number; count: number }>();
++function consumeReactionFixedWindow(key: string): RateLimitResult {
++  const now = Date.now();
++  const entry = reactionWindows.get(key);
++  if (!entry || now - entry.windowStart >= REACTION_WINDOW_MS) {
++    reactionWindows.set(key, { windowStart: now, count: 1 });
++    return { allowed: true, limit: REACTION_LIMIT, remaining: REACTION_LIMIT - 1, retryAfterMs: 0 };
++  }
++  if (entry.count >= REACTION_LIMIT) {
++    return {
++      allowed: false,
++      limit: REACTION_LIMIT,
++      remaining: 0,
++      retryAfterMs: Math.max(0, entry.windowStart + REACTION_WINDOW_MS - now),
++    };
++  }
++  entry.count++;
++  return { allowed: true, limit: REACTION_LIMIT, remaining: REACTION_LIMIT - entry.count, retryAfterMs: 0 };
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -147,14 +239,69 @@ export function consumeReactionAttempt(sessionHash: string): RateLimitResult {
+ // ---------------------------------------------------------------------------
+ 
+ /**
+- * Consume a bottle-throw attempt. 5 per 24h per session.
++ * Reconstruct the token-bucket state from this session's stored submissions.
++ *
++ * We fetch every ExchangeMessage this session created in the last 5h (= the
++ * full window; older rows can't affect the count) and replay them through a
++ * simulated token bucket starting full. The result is the durable token
++ * count that survives server restarts.
++ *
++ *   - Start: tokens = THROW_LIMIT, clock = oldest submission time.
++ *   - For each submission: regenerate from clock→t, then consume 1.
++ *   - After all submissions: regenerate from last→now.
++ *   - Return { tokens (float), retryAfterMs }.
++ *
++ * PII-rejected submissions are never stored, so they don't appear here —
++ * but the in-memory bucket DOES count them (it runs before the PII gate).
++ * So effective coverage = max(memory[all attempts], DB[stored attempts]).
++ */
++async function dbTokenBucketState(
++  sessionHash: string,
++  now: number,
++): Promise<{ tokens: number; retryAfterMs: number }> {
++  const since = new Date(now - THROW_WINDOW_MS);
++  const submissions = await db.exchangeMessage.findMany({
++    where: { authorId: sessionHash, createdAt: { gte: since } },
++    select: { createdAt: true },
++    orderBy: { createdAt: "asc" },
++  });
++
++  if (submissions.length === 0) {
++    return { tokens: THROW_LIMIT, retryAfterMs: 0 };
++  }
++
++  // Simulate the bucket from the oldest submission forward.
++  let tokens = THROW_LIMIT;
++  let clock = submissions[0].createdAt.getTime();
++
++  for (const sub of submissions) {
++    const t = sub.createdAt.getTime();
++    if (t > clock) {
++      const elapsed = t - clock;
++      tokens = Math.min(THROW_LIMIT, tokens + elapsed / REFILL_INTERVAL_MS);
++      clock = t;
++    }
++    tokens -= 1; // consume
++    if (tokens < 0) tokens = 0; // safety clamp (shouldn't happen in normal flow)
++  }
++
++  // Regenerate to "now".
++  if (now > clock) {
++    tokens = Math.min(THROW_LIMIT, tokens + (now - clock) / REFILL_INTERVAL_MS);
++  }
++
++  const retryAfterMs = tokens >= 1 ? 0 : Math.ceil((1 - tokens) * REFILL_INTERVAL_MS);
++  return { tokens, retryAfterMs };
++}
++
++/**
++ * Consume a bottle-throw attempt. Token-bucket: 10 capacity, 1 refill / 30min.
+  *
+  *   1. Atomic in-memory check+record (race-free).
+- *   2. If memory allows, a durable DB backstop: count this session's stored
+- *      submissions in the last 24h. If the DB already shows >= 5, block even
+- *      though memory allowed (covers the post-restart case where memory was
+- *      wiped but the DB remembers). The memory record from step 1 is a
+- *      harmless over-record in that case.
++ *   2. If memory allows, a durable DB backstop: reconstruct the bucket from
++ *      stored submissions. If the DB says < 1 token, block until the next
++ *      drip (covers the post-restart case where memory was wiped but the DB
++ *      remembers).
+  *
+  * Note: PII-rejected submissions are never stored, so the DB backstop cannot
+  * see them — but the in-memory step does (it runs before PII). So effective
+@@ -167,42 +314,33 @@ export async function consumeThrowAttempt(
+   const memKey = `throw:${sessionHash}`;
+ 
+   // 1. Atomic memory check+record.
+-  const mem = consumeMemory(memKey, THROW_LIMIT, THROW_WINDOW_MS, now);
++  const mem = consumeMemory(memKey, THROW_LIMIT, REFILL_INTERVAL_MS, now);
+   if (!mem.allowed) {
+     return mem;
+   }
+ 
+-  // 2. Durable DB backstop.
+-  const since = new Date(now - THROW_WINDOW_MS);
+-  const [dbCount, dbMin] = await Promise.all([
+-    db.exchangeMessage.count({
+-      where: { authorId: sessionHash, createdAt: { gte: since } },
+-    }),
+-    db.exchangeMessage.aggregate({
+-      where: { authorId: sessionHash, createdAt: { gte: since } },
+-      _min: { createdAt: true },
+-    }),
+-  ]);
+-
+-  if (dbCount >= THROW_LIMIT) {
+-    // Blocked by the durable backstop. Compute retry from the oldest DB row.
+-    const oldest = dbMin._min.createdAt;
+-    const retryAfterMs = oldest
+-      ? Math.max(0, oldest.getTime() + THROW_WINDOW_MS - now)
+-      : THROW_WINDOW_MS;
++  // 2. Durable DB backstop — reconstruct the bucket from stored submissions.
++  const dbState = await dbTokenBucketState(sessionHash, now);
++  if (dbState.tokens < 1) {
++    // DB is tighter than memory (e.g. after a restart). Block until the next
++    // drip. Note: memory already consumed 1 — this is a conservative
++    // over-count, acceptable because the DB is the authoritative gate here.
+     return {
+       allowed: false,
+       limit: THROW_LIMIT,
+       remaining: 0,
+-      retryAfterMs,
++      retryAfterMs: dbState.retryAfterMs,
+     };
+   }
+ 
+   // Allowed by both gates. Report the tighter remaining of the two.
++  // DB tokens reflect state BEFORE this attempt (the row isn't stored yet),
++  // so subtract 1 from the DB view to account for the consume we just did.
++  const dbRemainingAfterConsume = Math.max(0, Math.floor(dbState.tokens) - 1);
+   return {
+     allowed: true,
+     limit: THROW_LIMIT,
+-    remaining: Math.min(mem.remaining, THROW_LIMIT - dbCount - 1),
++    remaining: Math.min(mem.remaining, dbRemainingAfterConsume),
+     retryAfterMs: 0,
+   };
+ }
+@@ -210,17 +348,16 @@ export async function consumeThrowAttempt(
+ /**
+  * Peek (WITHOUT consuming) how many throw attempts remain for this session.
+  *
+- * Mirror of `consumeThrowAttempt` minus the record step. Used by the daily
+- * quota indicator (GET /api/throw-quota) so the UI can show "2 of 5 bottles
+- * left" without spending an attempt.
++ * Mirror of `consumeThrowAttempt` minus the record step. Used by the quota
++ * indicator (GET /api/throw-quota) so the UI can show "7 of 10 bottles left"
++ * without spending an attempt.
+  *
+- * Returns the tighter of the in-memory sliding window and the durable DB
+- * backstop (stored submissions in the last 24h). The in-memory window also
+- * counts attempts that were later rejected by PII / captcha / duplicate /
+- * moderation gates but never stored — so the indicator reflects "attempts
+- * consumed", not just "bottles successfully published". After a server
+- * restart the in-memory window is wiped and the DB backstop alone carries
+- * the durable quota.
++ * Returns the tighter of the in-memory bucket and the durable DB backstop.
++ * The in-memory bucket also counts attempts that were later rejected by PII /
++ * captcha / duplicate / moderation gates but never stored — so the indicator
++ * reflects "attempts consumed", not just "bottles successfully published".
++ * After a server restart the in-memory bucket is wiped and the DB backstop
++ * alone carries the durable quota.
+  */
+ export async function peekThrowRemaining(
+   sessionHash: string,
+@@ -228,53 +365,28 @@ export async function peekThrowRemaining(
+   const now = Date.now();
+   const memKey = `throw:${sessionHash}`;
+ 
+-  // 1. In-memory peek — prune but do NOT push. arr.length is the count of
+-  //    attempts still inside the rolling 24h window for this session.
+-  const arr = pruneKey(memKey, now, THROW_WINDOW_MS);
+-  if (arr.length >= THROW_LIMIT) {
+-    const oldest = arr[0] ?? now;
+-    return {
+-      allowed: false,
+-      limit: THROW_LIMIT,
+-      remaining: 0,
+-      retryAfterMs: Math.max(0, oldest + THROW_WINDOW_MS - now),
+-    };
+-  }
+-  const memRemaining = THROW_LIMIT - arr.length;
++  // 1. In-memory peek.
++  const mem = peekMemory(memKey, THROW_LIMIT, REFILL_INTERVAL_MS, now);
+ 
+-  // 2. Durable DB backstop — count + oldest-stored-row in the last 24h.
+-  const since = new Date(now - THROW_WINDOW_MS);
+-  const [dbCount, dbMin] = await Promise.all([
+-    db.exchangeMessage.count({
+-      where: { authorId: sessionHash, createdAt: { gte: since } },
+-    }),
+-    db.exchangeMessage.aggregate({
+-      where: { authorId: sessionHash, createdAt: { gte: since } },
+-      _min: { createdAt: true },
+-    }),
+-  ]);
+-
+-  if (dbCount >= THROW_LIMIT) {
+-    const oldest = dbMin._min.createdAt;
+-    const retryAfterMs = oldest
+-      ? Math.max(0, oldest.getTime() + THROW_WINDOW_MS - now)
+-      : THROW_WINDOW_MS;
+-    return {
+-      allowed: false,
+-      limit: THROW_LIMIT,
+-      remaining: 0,
+-      retryAfterMs,
+-    };
+-  }
++  // 2. Durable DB backstop — reconstruct the bucket from stored submissions.
++  const dbState = await dbTokenBucketState(sessionHash, now);
++
++  const dbRemaining = Math.floor(dbState.tokens);
++  const remaining = Math.min(mem.remaining, dbRemaining);
++
++  // When blocked, report the LONGER of the two retry windows (the user has to
++  // wait for whichever gate is stricter to clear — but in practice after a
++  // restart the DB is stricter, and during normal operation both agree).
++  const retryAfterMs =
++    remaining >= 1
++      ? 0
++      : Math.max(mem.retryAfterMs, dbState.retryAfterMs);
+ 
+-  // Allowed by both gates. Report the tighter remaining of the two — no
+-  // "-1" here because this is a peek, not a consume: the next attempt is
+-  // not yet counted.
+   return {
+-    allowed: true,
++    allowed: remaining >= 1,
+     limit: THROW_LIMIT,
+-    remaining: Math.min(memRemaining, THROW_LIMIT - dbCount),
+-    retryAfterMs: 0,
++    remaining,
++    retryAfterMs,
+   };
+ }
+ 
+@@ -284,14 +396,28 @@ export async function peekThrowRemaining(
+ 
+ /** Test-only: clear all in-memory rate-limit state. */
+ export function _resetRateLimitForTests(): void {
+-  windows.clear();
++  buckets.clear();
++  reactionWindows.clear();
+ }
+ 
+-/** Test-only: peek the in-memory count for a key (no record). */
++/** Test-only: peek the in-memory token count for a key (no record). */
+ export function _peekMemoryCount(
+   kind: "throw" | "react",
+   sessionHash: string,
+ ): number {
+-  const windowMs = kind === "throw" ? THROW_WINDOW_MS : REACTION_WINDOW_MS;
+-  return countInWindow(`${kind}:${sessionHash}`, windowMs);
++  if (kind === "react") {
++    const entry = reactionWindows.get(`react:${sessionHash}`);
++    if (!entry) return 0;
++    if (Date.now() - entry.windowStart >= REACTION_WINDOW_MS) return 0;
++    return entry.count;
++  }
++  const entry = buckets.get(`throw:${sessionHash}`);
++  if (!entry) return 0;
++  // Reflect regenerated state.
++  const now = Date.now();
++  const regenerated = Math.min(
++    THROW_LIMIT,
++    entry.tokens + (now - entry.lastRefill) / REFILL_INTERVAL_MS,
++  );
++  return Math.floor(regenerated);
+ }
