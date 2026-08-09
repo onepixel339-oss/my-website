@@ -260,9 +260,16 @@ export default function Home() {
               </TabsList>
 
               <TabsContent value="sea" className="mt-6 space-y-8">
-                {/* The WRITE screen — the hero. */}
+                {/* The WRITE screen — the hero. Always public: every
+                    visitor can cast a bottle and (via the reciprocal-unlock
+                    exchange inside the composer) receive one to react to. */}
                 <BottleComposer onPublished={() => setRefreshSignal((n) => n + 1)} />
-                <BottleFeed refreshSignal={refreshSignal} />
+                {/* The public "Bottles in the sea" feed is ADMIN-ONLY. The
+                    operator requested that casual visitors not browse the
+                    full sea — they can still throw and receive via the
+                    composer, but the scrollable feed of everyone's bottles
+                    is gated behind the admin session. */}
+                {isAdmin && <BottleFeed refreshSignal={refreshSignal} />}
               </TabsContent>
 
               <TabsContent value="gems" className="mt-6">
